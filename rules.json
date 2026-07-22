@@ -1,254 +1,272 @@
 [
   {
     "id": "CRIT-MQ-01",
-    "regex": "ChannelAllocationException.*connection.*cannot.*support.*more.*channels",
+    "regex": "(?i)ChannelAllocationException.*connection.*cannot.*support.*more.*channels",
     "service_target": "RADIO",
     "severidad": "CRITICAL"
   },
   {
     "id": "PACS-NULL-01",
-    "regex": "Compression -- Exception: Object reference not set",
+    "regex": "(?i)Compression -- Exception: Object reference not set",
     "service_target": "SUITESTENSAPACSSRV",
     "severidad": "CRITICAL"
   },
   {
     "id": "IMG-CORRUPT-01",
-    "regex": "Error 0x30A in CIPPHnd|Error on conversion from|RawToJpegLossLess",
+    "regex": "(?i)Error 0x30A in CIPPHnd|Error on conversion from|RawToJpegLossLess",
     "service_target": "*",
     "severidad": "CRITICAL"
   },
   {
     "id": "DCM-COM-01",
-    "regex": "0x80040221|Interop\\.DCMProxy|MPSClientEngine.*Exception",
+    "regex": "(?i)0x80040221|Interop\\.DCMProxy|MPSClientEngine.*Exception",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "DCM-STORE-01",
-    "regex": "C-STORE-RQ.*FAILURE",
+    "regex": "(?i)C-STORE-RQ.*FAILURE",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "MPS-ERR-01",
-    "regex": "TargetException|Non-static method",
+    "regex": "(?i)TargetException|Non-static method",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "MPS-LIST-01",
-    "regex": "GetClientRimageList.*failed",
+    "regex": "(?i)GetClientRimageList.*failed",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "SYS-LINQ-01",
-    "regex": "InvalidOperationException.*Sequence contains no elements",
+    "regex": "(?i)InvalidOperationException.*Sequence contains no elements",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "DCM-NULL-01",
-    "regex": "NullReferenceException.*SL\\.Framework\\.DICOM",
+    "regex": "(?i)NullReferenceException.*SL\\.Framework\\.DICOM",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "SYS-DLL-01",
-    "regex": "ReflectionTypeLoadException|assembly.*not found",
+    "regex": "(?i)ReflectionTypeLoadException|assembly.*not found",
     "service_target": "IIS",
     "severidad": "HIGH"
   },
   {
     "id": "DB-CONN-WALLE",
-    "regex": "SqlException.*Cannot open database.*ExtensaWalle",
+    "regex": "(?i)SqlException.*Cannot open database.*ExtensaWalle",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "MPS-CFG-02",
-    "regex": "MPS configuration error: client.*does not belong to any Client Group",
+    "regex": "(?i)MPS configuration error: client.*does not belong to any Client Group",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "NET-TIME-10060",
-    "regex": "10060 -> Connection timed out",
+    "regex": "(?i)10060 -> Connection timed out",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "SYS-DISK-01",
-    "regex": "Disk full|espacio en disco insuficiente|IOException",
+    "regex": "(?i)Disk full|espacio en disco insuficiente|IOException",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "SYS-FILE-01",
-    "regex": "Error On Get File Information",
+    "regex": "(?i)Error On Get File Information",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "DB-DEADLOCK-01",
-    "regex": "Transaction.*was deadlock.*chosen as the deadlock victim",
+    "regex": "(?i)Transaction.*was deadlock.*chosen as the deadlock victim",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "DB-POOL-01",
-    "regex": "Timeout expired.*prior to obtaining a connection from the pool",
+    "regex": "(?i)Timeout expired.*prior to obtaining a connection from the pool",
     "service_target": "*",
     "severidad": "HIGH"
   },
   {
     "id": "AUTH-NULL-01",
-    "regex": "IDX10000|token.*cannot be.*null",
+    "regex": "(?i)IDX10000|token.*cannot be.*null",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "SEC-REST-01",
-    "regex": "SecurityException.*Estensa\\.Web\\.Rest",
+    "regex": "(?i)SecurityException.*Estensa\\.Web\\.Rest",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "CFG-PARAM-01",
-    "regex": "ArgumentException.*IdPacsScelto.*not found",
+    "regex": "(?i)ArgumentException.*IdPacsScelto.*not found",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "NET-ABORT-10053",
-    "regex": "10053 -> Software caused connection abort",
+    "regex": "(?i)10053 -> Software caused connection abort",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "NET-RESET-10054",
-    "regex": "10054 -> Connection reset by peer",
+    "regex": "(?i)10054 -> Connection reset by peer",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "WEB-JS-CONFIG",
-    "regex": "(Cannot read properties|can't access property).*html5ConfigSett",
+    "regex": "(?i)(Cannot read properties|can't access property).*html5ConfigSett",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "WEB-GEN-01",
-    "regex": "Estensa\\.Web.*Unspecified error|Unspecified error",
+    "regex": "(?i)Estensa\\.Web.*Unspecified error|Unspecified error",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "SVC-LOOP-01",
-    "regex": "RADIO THREAD EXAMINATION.*Error in progress.*thread is going to sleep",
+    "regex": "(?i)RADIO THREAD EXAMINATION.*Error in progress.*thread is going to sleep",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "INT-FALSE-01",
-    "regex": "Result from Integration Service is FALSE",
+    "regex": "(?i)Result from Integration Service is FALSE",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "CFG-DOM-01",
-    "regex": "Invalid Parameter: DBManager\\.VerifyDomainRegistration",
+    "regex": "(?i)Invalid Parameter: DBManager\\.VerifyDomainRegistration",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "WEB-PROXY-01",
-    "regex": "Estensa\\.Web\\.Exceptions\\.ProxyFault",
+    "regex": "(?i)Estensa\\.Web\\.Exceptions\\.ProxyFault",
     "service_target": "w3wp",
     "severidad": "MEDIUM"
   },
   {
     "id": "MPS-REG-01",
-    "regex": "MPS not registered|Not registered MPS IP",
+    "regex": "(?i)MPS not registered|Not registered MPS IP",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "AUTH-TOKEN-01",
-    "regex": "SecurityTokenSignatureKeyNotFoundException|IDX10517",
+    "regex": "(?i)SecurityTokenSignatureKeyNotFoundException|IDX10517",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "WEB-KEY-01",
-    "regex": "KeyNotFoundException.*The given key was not present",
+    "regex": "(?i)KeyNotFoundException.*The given key was not present",
     "service_target": "w3wp",
     "severidad": "MEDIUM"
   },
   {
     "id": "NET-SOCK-10038",
-    "regex": "10038 -> Socket operation on non-socket",
+    "regex": "(?i)10038 -> Socket operation on non-socket",
     "service_target": "*",
     "severidad": "MEDIUM"
   },
   {
     "id": "DCM-VAL-01",
-    "regex": "Dicomdir Validation.*element.*not valid",
+    "regex": "(?i)Dicomdir Validation.*element.*not valid",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "INT-PAT-WARN",
-    "regex": "SVC INTEGRATION WARNING.*The patient",
+    "regex": "(?i)SVC INTEGRATION WARNING.*The patient",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "DCM-IMPORT-01",
-    "regex": "Failure On Read AAssociateRQ|Association rejected",
+    "regex": "(?i)Failure On Read AAssociateRQ|Association rejected",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "INT-RIS-01",
-    "regex": "SVC INTEGRATION WARNING.*patient.*not",
+    "regex": "(?i)SVC INTEGRATION WARNING.*patient.*not",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "INT-TRACE-01",
-    "regex": "NewsExtensaExaminationRadio_(start|end)",
+    "regex": "(?i)NewsExtensaExaminationRadio_(start|end)",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "DCM-TYPE-01",
-    "regex": "File Not Dicom",
+    "regex": "(?i)File Not Dicom",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "SEC-PERM-01",
-    "regex": "User unauthorized access.*authorizations to be enabled",
+    "regex": "(?i)User unauthorized access.*authorizations to be enabled",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "DCM-OBJ-LEAK",
-    "regex": "EMGDicom detect live object|Try to dump details of.*live object|Recognized live object",
+    "regex": "(?i)EMGDicom detect live object|Try to dump details of.*live object|Recognized live object",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "SYS-LOC-01",
-    "regex": "Error translating.*Resources\\.Strings",
+    "regex": "(?i)Error translating.*Resources\\.Strings",
     "service_target": "*",
     "severidad": "LOW"
   },
   {
     "id": "CFG-VNEXT-01",
-    "regex": "Integration.*IsChangeModule.*VNextAdmin.*false",
+    "regex": "(?i)Integration.*IsChangeModule.*VNextAdmin.*false",
     "service_target": "RADIO",
     "severidad": "LOW"
+  },
+  {
+    "id": "AUTH-CRED-Q-01",
+    "regex": "(?i)CredentialQueueService.*Error managing credential queue",
+    "service_target": "*",
+    "severidad": "HIGH"
+  },
+  {
+    "id": "AUTH-REFRESH-01",
+    "regex": "(?i)Error on RefreshAuthenticationToken.*HttpRequestException",
+    "service_target": "*",
+    "severidad": "HIGH"
+  },
+  {
+    "id": "SYS-HTTP-RET-01",
+    "regex": "(?i)Error on retrieve requests.*HttpRequestException",
+    "service_target": "*",
+    "severidad": "HIGH"
   }
 ]

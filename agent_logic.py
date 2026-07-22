@@ -1034,7 +1034,7 @@ def test_connection_elastic(data):
     except Exception as e:
         return {"success": False, "msg": str(e)}
 
-def recolectar_logs_elastic(elastic_cfg, log_func=None):
+def recolectar_logs_elastic(elastic_cfg, global_interval_minutes=5, log_func=None):
     resultado = {"events": [], "meta": {"scan_time": datetime.now().isoformat() + "Z", "new_alerts": 0}}
     
     # 1. CARGAR Y PRE-COMPILAR REGLAS
@@ -1064,10 +1064,10 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
 
     if log_func:
         log_func(f"🔍 Consultando ElasticSearch desde: {last_ts}")
-        
+
     # 3. PAGINACIÓN CON SEARCH_AFTER (Escalabilidad)
     host = elastic_cfg.get("host", "").strip()
-    port = elastic_cfg.get("port", 9200)
+    port = elastic_cfg.get("port", 29200)
     index_pattern = elastic_cfg.get("index_pattern", "se-es-logging-*") 
     url = f"http://{host}:{port}/{index_pattern}/_search"
     auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
@@ -1331,7 +1331,11 @@ def ejecutar_ciclo_agente(config, log_callback=None):
     # --- 6.8. Software Monitoring: Logs de Suitestensa (ElasticSearch) ---
     if config.get("enabled_elastic") and config.get("elastic", {}).get("host"):
         try:
-            elastic_data = recolectar_logs_elastic(config["elastic"], log_callback)
+            # 1. Extraemos el intervalo de configuración (o usamos 5 por defecto)
+            intervalo_global = int(config.get("interval_minutes", 5))
+            
+            # 2. Pasamos el intervalo_global a la función
+            elastic_data = recolectar_logs_elastic(config["elastic"], intervalo_global, log_callback)
             
             # Guardamos el checkpoint en memoria para persistirlo post-envío
             if "_checkpoint_to_save" in elastic_data:
@@ -1349,7 +1353,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         except Exception as e:
             collection_meta["suitestensa_logs"]["status"] = "error"
             collection_meta["suitestensa_logs"]["error"] = str(e)
-
+            
     # --- 7. Envío al servidor central ---
     try:
         r = requests.post(
