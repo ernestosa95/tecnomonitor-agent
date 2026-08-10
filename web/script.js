@@ -31,6 +31,12 @@ function toggleCard(bodyId, checkbox) {
     if (!el) return;
     el.style.opacity       = checkbox.checked ? '1'    : '0.5';
     el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
+
+    // NUEVO: Si se desactiva la tarjeta SQL, desactivamos el autoenrute DICOM por seguridad
+    if (bodyId === 'sql_body' && !checkbox.checked) {
+        const dicomRoutingSwitch = document.getElementById('enabled_dicom_routing');
+        if (dicomRoutingSwitch) dicomRoutingSwitch.checked = false;
+    }
 }
 
 function toggleHypervisorFields() {
@@ -132,6 +138,9 @@ async function cargarConfiguracion() {
             document.getElementById('sql_pass').value       = cfg.sql.pass || '';
             document.getElementById('sql_exec_day').value   = cfg.sql.executions_per_day || 3;
             document.getElementById('sql_start_date').value = cfg.sql.historical_start_date || '';
+            
+            // NUEVO: Cargar el estado del sub-ítem de autoenrute DICOM
+            document.getElementById('enabled_dicom_routing').checked = cfg.sql.enabled_dicom_routing || false;
         }
         const chkSql = document.getElementById('enable_sql');
         chkSql.checked = !!cfg.enabled_sql;
@@ -244,6 +253,9 @@ async function guardarConfiguracion() {
             pass:                  document.getElementById('sql_pass').value,
             executions_per_day:    parseInt(document.getElementById('sql_exec_day').value) || 3,
             historical_start_date: document.getElementById('sql_start_date').value,
+            
+            // NUEVO: Guardar el estado del sub-ítem de enrute DICOM
+            enabled_dicom_routing: document.getElementById('enabled_dicom_routing').checked
         },
 
         enabled_vms: document.getElementById('enable_vms').checked,

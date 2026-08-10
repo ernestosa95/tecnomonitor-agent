@@ -15,7 +15,6 @@ import security
 import psutil
 import mirth_collector
 import ssl
-import socket
 from urllib.parse import urlparse
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -34,8 +33,6 @@ ELASTIC_CHECKPOINT_FILE = os.path.join(DATA_DIR, ".elastic_checkpoint")
 UNKNOWNS_LAB_FILE = os.path.join(DATA_DIR, "unknowns_lab.json")
 # Asumimos que distribuirás el 'rules.json' junto al ejecutable o en el DATA_DIR
 RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json") 
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
 # QUERY SQL (sin cambios de lógica, solo se mantiene)
@@ -121,13 +118,11 @@ def safe_int(value):
     except Exception:
         return 0
 
-
 def safe_float(value, decimals=2):
     try:
         return round(float(value), decimals) if value is not None else 0.0
     except Exception:
         return 0.0
-
 
 def verificar_puerto(ip, puerto, timeout=2):
     try:
@@ -139,13 +134,11 @@ def verificar_puerto(ip, puerto, timeout=2):
     except Exception:
         return False
 
-
 def parse_wmi_date(wmi_date):
     try:
         return datetime.strptime(wmi_date.split('.')[0], "%Y%m%d%H%M%S")
     except Exception:
         return datetime.now()
-
 
 # ---------------------------------------------------------------------------
 # CHECKPOINT SQL — escritura atómica, guardado solo al confirmar envío exitoso
@@ -159,7 +152,6 @@ def get_last_checkpoint():
             pass
     return None
 
-
 def save_checkpoint(dt):
     """Escritura atómica: escribe en .tmp y renombra. Nunca deja el archivo a medias."""
     try:
@@ -170,7 +162,6 @@ def save_checkpoint(dt):
     except Exception:
         pass
 
-
 def reset_checkpoint():
     for path in [SQL_CHECKPOINT_FILE, SQL_CHECKPOINT_FILE + ".tmp"]:
         if os.path.exists(path):
@@ -179,9 +170,8 @@ def reset_checkpoint():
             except Exception:
                 pass
 
-
 # ---------------------------------------------------------------------------
-# MÉTRICAS SQL
+# MÉTRICAS SQL (NIVEL NEGOCIO - EJECUCIÓN LENTA)
 # ---------------------------------------------------------------------------
 def extraer_metricas_sql(sql_config, log_func=None):
     if not sql_config or not sql_config.get("host"):
@@ -257,7 +247,6 @@ def extraer_metricas_sql(sql_config, log_func=None):
         data_json["application_metrics"]["end_time_extraction"]       = end_date_sql
 
         # IMPORTANTE: el checkpoint se guarda solo cuando el POST confirme éxito.
-        # Devolvemos también el target_end_time para que ejecutar_ciclo_agente pueda guardarlo.
         data_json["_checkpoint_to_save"] = target_end_time
         return data_json
 
@@ -269,6 +258,73 @@ def extraer_metricas_sql(sql_config, log_func=None):
         if conn:
             conn.close()
 
+# ---------------------------------------------------------------------------
+# MÉTRICAS SQL (INFRAESTRUCTURA - EJECUCIÓN RÁPIDA)
+# ---------------------------------------------------------------------------
+def get_dicom_routing_queues(sql_config, log_func=None):
+    if not sql_config or not sql_config.get("host"):
+        return []
+
+    conn_str          = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_config['host']};DATABASE={sql_config['db']};UID={sql_config['user']};PWD={sql_config['pass']}"
+    conn_str_fallback = f"DRIVER={{SQL Server}};SERVER={sql_config['host']};DATABASE={sql_config['db']};UID={sql_config['user']};PWD={sql_config['pass']}"
+
+    conn = None
+    try:
+        try:
+            conn = pyodbc.connect(conn_str, timeout=5)
+        except pyodbc.Error:
+            conn = pyodbc.connect(conn_str_fallback, timeout=5)
+
+        cursor = conn.cursor()
+
+        query = """
+        SELECT 
+            r.[IDRULE], r.[FROMNODE] AS [FROMNODE_KEY], c_from.[NICKNAME] AS [FROMNODE_NICKNAME],
+            c_from.[HOSTNAME] AS [FROMNODE_HOSTNAME], r.[TONODE] AS [TONODE_KEY],
+            c_to.[NICKNAME] AS [TONODE_NICKNAME], c_to.[HOSTNAME] AS [TONODE_HOSTNAME],
+            p.[PENDING_COUNT] AS [PENDING_INSTANCES]
+        FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGRULES] r WITH (NOLOCK)
+        LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_from WITH (NOLOCK)
+            ON r.[FROMNODE] = c_from.[CLIENT_KEY]
+        LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_to WITH (NOLOCK)
+            ON r.[TONODE] = c_to.[CLIENT_KEY]
+        INNER JOIN (
+            SELECT [IDRULE], COUNT(*) AS [PENDING_COUNT]
+            FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGQUEUE] WITH (NOLOCK)
+            GROUP BY [IDRULE]
+        ) p ON r.[IDRULE] = p.[IDRULE]
+        WHERE r.[ACTIVE] = 1;
+        """
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        
+        routing_queues = []
+        for row in rows:
+            routing_queues.append({
+                "id_rule": row.IDRULE,
+                "from_node": {
+                    "key": row.FROMNODE_KEY,
+                    "nickname": row.FROMNODE_NICKNAME,
+                    "hostname": row.FROMNODE_HOSTNAME
+                },
+                "to_node": {
+                    "key": row.TONODE_KEY,
+                    "nickname": row.TONODE_NICKNAME,
+                    "hostname": row.TONODE_HOSTNAME
+                },
+                "pending_instances": row.PENDING_INSTANCES
+            })
+            
+        return routing_queues
+
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ Error SQL extrayendo colas de enrute: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
 
 # ---------------------------------------------------------------------------
 # PROXMOX
@@ -666,7 +722,6 @@ def test_connection_vm_wmi(vm_info):
         return {"success": False, "msg": str(e)}
     finally:
         pythoncom.CoUninitialize()
-
 
 def _recolectar_wmi_interno(vm_info, log_func):
     """
@@ -1303,7 +1358,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             if log_callback:
                 log_callback(f"❌ Error capa WMI: {e}")
 
-    # --- 5. Métricas SQL ---
+    # --- 5. Métricas SQL (KPIs de Negocio) ---
     if "_sql_data_payload" in config:
         payload = config["_sql_data_payload"]
         reporte["application_metrics"] = payload.get("application_metrics", payload)
@@ -1311,9 +1366,15 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["sql"]["block_start"] = payload.get("application_metrics", {}).get("start_time_extraction", "")
         collection_meta["sql"]["block_end"]   = payload.get("application_metrics", {}).get("end_time_extraction", "")
 
+    # --- 5.5. Software Monitoring: Autoenrute DICOM ---
+    if config.get("enabled_sql") and config.get("sql", {}).get("enabled_dicom_routing"):
+        reporte["software_monitoring"]["dicom_routing_queues"] = get_dicom_routing_queues(config.get("sql"), log_callback)
+    else:
+        reporte["software_monitoring"]["dicom_routing_queues"] = []
+
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):
-        # CAMBIO AQUÍ: Llamamos a mirth_collector en lugar de la función local
+        # Llamamos a mirth_collector en lugar de la función local
         mirth_data, m_status, m_errors = mirth_collector.recolectar_mirth(config["mirth_servers"], log_callback)
         reporte["software_monitoring"]["mirth"] = mirth_data
         collection_meta["mirth"]["status"] = m_status
