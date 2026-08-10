@@ -1,7 +1,7 @@
 [Setup]
 ; --- Metadatos de la Aplicación ---
 AppName=TecnoMonitor Agent
-AppVersion=4.3 Sentinel
+AppVersion=4.3.1 Sentinel
 AppPublisher=Medical IT (Soporte Técnico)
 AppCopyright=Copyright (C) 2026
 
@@ -13,7 +13,7 @@ DisableWelcomePage=yes
 DefaultDirName={pf}\TecnoMonitor
 DefaultGroupName=TecnoMonitor
 OutputDir=Output
-OutputBaseFilename=TecnoMonitor_v4.3_Sentinel_Setup
+OutputBaseFilename=TecnoMonitor_v4.3.1_Sentinel_Setup
 
 ; --- Iconos y Permisos ---
 SetupIconFile=logo.ico

@@ -259,72 +259,72 @@ def extraer_metricas_sql(sql_config, log_func=None):
             conn.close()
 
 # ---------------------------------------------------------------------------
-# MÉTRICAS SQL (INFRAESTRUCTURA - EJECUCIÓN RÁPIDA)
+# AUTOENRUTE DICOM (vía ElasticSearch - índice ext_dicom_queues)
+# Reemplaza la extracción directa por pyodbc contra SQL Server.
 # ---------------------------------------------------------------------------
-def get_dicom_routing_queues(sql_config, log_func=None):
-    if not sql_config or not sql_config.get("host"):
+def get_dicom_routing_queues(elastic_cfg, log_func=None, index_name="ext_dicom_queues"):
+    """
+    Lee el estado de las reglas de autoenrute DICOM desde ElasticSearch.
+    Logstash indexa `ext_dicom_queues` cada 5 min (una fila por IDRULE,
+    upsert por document_id), así que el índice ya refleja el último estado
+    y sólo contiene reglas activas (WHERE ACTIVE=1 en el pipeline).
+
+    Devuelve la MISMA estructura que la versión SQL previa para no romper
+    la ingesta ni el resto del pipeline.
+    """
+    if not elastic_cfg or not elastic_cfg.get("host"):
         return []
 
-    conn_str          = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_config['host']};DATABASE={sql_config['db']};UID={sql_config['user']};PWD={sql_config['pass']}"
-    conn_str_fallback = f"DRIVER={{SQL Server}};SERVER={sql_config['host']};DATABASE={sql_config['db']};UID={sql_config['user']};PWD={sql_config['pass']}"
+    host = elastic_cfg.get("host", "").strip()
+    port = elastic_cfg.get("port", 29200)
+    url  = f"http://{host}:{port}/{index_name}/_search"
+    auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
 
-    conn = None
+    # El índice ya trae una fila por regla activa; ordenamos por pendientes
+    # desc para que los cuellos de botella queden primero.
+    payload = {
+        "size": 1000,
+        "query": {"match_all": {}},
+        "sort": [{"pending_instances": {"order": "desc"}}]
+    }
+
     try:
-        try:
-            conn = pyodbc.connect(conn_str, timeout=5)
-        except pyodbc.Error:
-            conn = pyodbc.connect(conn_str_fallback, timeout=5)
-
-        cursor = conn.cursor()
-
-        query = """
-        SELECT 
-            r.[IDRULE], r.[FROMNODE] AS [FROMNODE_KEY], c_from.[NICKNAME] AS [FROMNODE_NICKNAME],
-            c_from.[HOSTNAME] AS [FROMNODE_HOSTNAME], r.[TONODE] AS [TONODE_KEY],
-            c_to.[NICKNAME] AS [TONODE_NICKNAME], c_to.[HOSTNAME] AS [TONODE_HOSTNAME],
-            p.[PENDING_COUNT] AS [PENDING_INSTANCES]
-        FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGRULES] r WITH (NOLOCK)
-        LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_from WITH (NOLOCK)
-            ON r.[FROMNODE] = c_from.[CLIENT_KEY]
-        LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_to WITH (NOLOCK)
-            ON r.[TONODE] = c_to.[CLIENT_KEY]
-        INNER JOIN (
-            SELECT [IDRULE], COUNT(*) AS [PENDING_COUNT]
-            FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGQUEUE] WITH (NOLOCK)
-            GROUP BY [IDRULE]
-        ) p ON r.[IDRULE] = p.[IDRULE]
-        WHERE r.[ACTIVE] = 1;
-        """
-        
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        
-        routing_queues = []
-        for row in rows:
-            routing_queues.append({
-                "id_rule": row.IDRULE,
-                "from_node": {
-                    "key": row.FROMNODE_KEY,
-                    "nickname": row.FROMNODE_NICKNAME,
-                    "hostname": row.FROMNODE_HOSTNAME
-                },
-                "to_node": {
-                    "key": row.TONODE_KEY,
-                    "nickname": row.TONODE_NICKNAME,
-                    "hostname": row.TONODE_HOSTNAME
-                },
-                "pending_instances": row.PENDING_INSTANCES
-            })
-            
-        return routing_queues
-
+        resp = requests.post(url, json=payload, auth=auth, timeout=15)
+        resp.raise_for_status()
+        hits = resp.json().get("hits", {}).get("hits", [])
     except Exception as e:
         if log_func:
-            log_func(f"⚠️ Error SQL extrayendo colas de enrute: {e}")
+            log_func(f"⚠️ Error ElasticSearch extrayendo colas de enrute: {e}")
         return []
-    finally:
-        if conn:
-            conn.close()
+
+    routing_queues = []
+    for hit in hits:
+        # Normalizamos claves a minúscula por si cambia lowercase_column_names.
+        src = {str(k).lower(): v for k, v in (hit.get("_source") or {}).items()}
+        try:
+            pending = int(src.get("pending_instances", 0) or 0)
+        except (TypeError, ValueError):
+            pending = 0
+
+        routing_queues.append({
+            "id_rule": src.get("idrule"),
+            "from_node": {
+                "key":      src.get("fromnode_key"),
+                "nickname": src.get("fromnode_nickname"),
+                "hostname": src.get("fromnode_hostname"),
+            },
+            "to_node": {
+                "key":      src.get("tonode_key"),
+                "nickname": src.get("tonode_nickname"),
+                "hostname": src.get("tonode_hostname"),
+            },
+            "pending_instances": pending,
+        })
+
+    if log_func:
+        log_func(f"✅ Autoenrute DICOM: {len(routing_queues)} reglas leídas de ES ('{index_name}').")
+
+    return routing_queues
 
 # ---------------------------------------------------------------------------
 # PROXMOX
@@ -1283,7 +1283,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
     reporte = {
         "envelope": {
             "schema_version": "4.3",
-            "agent_version":  "4.3",
+            "agent_version":  "4.3.1",
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },
@@ -1366,9 +1366,9 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["sql"]["block_start"] = payload.get("application_metrics", {}).get("start_time_extraction", "")
         collection_meta["sql"]["block_end"]   = payload.get("application_metrics", {}).get("end_time_extraction", "")
 
-    # --- 5.5. Software Monitoring: Autoenrute DICOM ---
-    if config.get("enabled_sql") and config.get("sql", {}).get("enabled_dicom_routing"):
-        reporte["software_monitoring"]["dicom_routing_queues"] = get_dicom_routing_queues(config.get("sql"), log_callback)
+    # --- 5.5. Software Monitoring: Autoenrute DICOM (vía ElasticSearch) ---
+    if config.get("sql", {}).get("enabled_dicom_routing") and config.get("elastic", {}).get("host"):
+        reporte["software_monitoring"]["dicom_routing_queues"] = get_dicom_routing_queues(config.get("elastic"), log_callback)
     else:
         reporte["software_monitoring"]["dicom_routing_queues"] = []
 
