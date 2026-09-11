@@ -75,6 +75,15 @@ de "problema de credenciales/red" de "WMI colgado".
 
 **Habilitación:** `enabled_sql` + `sql.*` · **Función:** `extraer_metricas_sql`
 
+> **v4.5 — variante vía Elastic:** un hospital puede migrar este módulo para que ya no conecte
+> directo a SQL Server, leyendo en cambio de índices que un pipeline de Logstash alimenta cada
+> hora (mismo patrón que el autoenrute DICOM más abajo). Habilitación:
+> `elastic.enabled_ris_metrics` · Función: `extraer_metricas_ris_elastic`. Ambos caminos
+> comparten el mismo checkpoint y producen el mismo `application_metrics` — ver
+> [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md) para la arquitectura completa y
+> [CONFIGURACION.md](./CONFIGURACION.md#kpis-de-ris-vía-elastic--coexistencia-con-enabled_sql-v45)
+> para la coexistencia de flags.
+
 Extrae KPIs operativos de las bases `ExtensaRadio`, `ExtensaPACS` y `SL_UserAndConfig` mediante
 una única consulta con tres sub-`SELECT ... FOR JSON PATH` (ver `SQL_QUERY` en `agent_logic.py`):
 

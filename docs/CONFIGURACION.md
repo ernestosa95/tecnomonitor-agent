@@ -83,7 +83,7 @@ Lista de equipos monitoreados vía WMI (VMs, workstations físicas o equipos mé
 |---|---|---|
 | `url` | string | URL a monitorear (se usa hostname + puerto, default 443) |
 
-## ElasticSearch (logs + autoenrute DICOM) — `enabled_elastic` + `elastic`
+## ElasticSearch (logs + autoenrute DICOM + KPIs de RIS) — `enabled_elastic` + `elastic`
 
 | Campo | Tipo | Default | Descripción |
 |---|---|---|---|
@@ -95,6 +95,12 @@ Lista de equipos monitoreados vía WMI (VMs, workstations físicas o equipos mé
 | `elastic.enabled_dicom_routing` | bool | `false` | Habilita el sub-módulo de autoenrute DICOM (ver más abajo) |
 | `elastic.dicom_index` | string | `"ext_dicom_queues"` | Índice donde Logstash publica el estado de las colas de autoenrute |
 | `elastic.dicom_max_age_minutes` | int | `15` | Antigüedad máxima aceptada de un documento del índice de autoenrute antes de considerarlo obsoleto |
+| `elastic.enabled_ris_metrics` | bool | `false` | **v4.5** — habilita la extracción de KPIs de RIS/PACS/usuarios vía Elastic en vez de SQL directo (ver [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md)). Convive con `enabled_sql`: si está en `true` y `elastic.host` está configurado, tiene prioridad sobre el módulo SQL directo para ese hospital |
+| `elastic.ris_executions_per_day` | int | `3` | Igual semántica que `sql.executions_per_day`, pero para el camino vía Elastic — define el tamaño de bloque (`24 / ris_executions_per_day` horas) que el agente reconstruye sumando buckets horarios |
+| `elastic.ris_historical_start_date` | string `YYYY-MM-DD` | — | Igual semántica que `sql.historical_start_date`, para el backfill del camino vía Elastic |
+| `elastic.ris_index_ris` | string | `"ext_ris_metrics_hourly"` | Índice con los buckets horarios de KPIs de RIS |
+| `elastic.ris_index_pacs` | string | `"ext_pacs_metrics_hourly"` | Índice con los buckets horarios de almacenamiento PACS |
+| `elastic.ris_index_users` | string | `"ext_users_metrics_hourly"` | Índice con los buckets horarios de actividad de usuarios |
 
 > ⚠️ **Nota de consistencia interna:** el valor por defecto de `elastic.port` difiere según la
 > función: `test_connection_elastic` (botón "Test" genérico) usa `9200` si la clave no está
@@ -113,6 +119,22 @@ si `elastic.enabled_dicom_routing` no está presente, se usa el valor viejo de
 `sql.enabled_dicom_routing`. Esto evita que agentes ya desplegados con la configuración vieja
 dejen de reportar en silencio hasta que alguien reguarde la configuración. Se puede retirar
 este fallback una vez que todos los hospitales estén confirmados en v4.4 o superior.
+
+### KPIs de RIS vía Elastic — coexistencia con `enabled_sql` (v4.5)
+
+`elastic.enabled_ris_metrics` no reemplaza a `enabled_sql`/`sql.*`: es una migración
+hospital por hospital. `headless_service.py` decide con un `elif` (no ambos a la vez):
+
+1. Si `elastic.enabled_ris_metrics` es `true` y `elastic.host` está configurado → usa
+   `agent_logic.extraer_metricas_ris_elastic` (requiere que el Logstash de ese hospital ya
+   publique a los tres índices horarios — ver [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md)).
+2. Si no, y `enabled_sql` + `sql.host` están configurados → sigue usando
+   `agent_logic.extraer_metricas_sql` (SQL Server directo), exactamente como hoy.
+
+Ambos caminos comparten el mismo checkpoint (`.sql_checkpoint`) y producen el mismo
+`application_metrics` en el envelope — no hay diferencia visible para el servidor central según
+cuál esté activo. Por ahora no hay campos en la GUI para esto: se configura editando
+`monitor_config.json` a mano en el hospital piloto.
 
 ## Claves internas transitorias (no se guardan en disco)
 
