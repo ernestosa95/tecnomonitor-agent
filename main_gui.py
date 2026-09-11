@@ -11,10 +11,9 @@ if sys.stderr is None:
 import eel
 import json
 import hashlib
-import subprocess
-import psutil
 import security
 import agent_logic
+import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
 
 DATA_DIR    = security.get_app_data_path()
 CONFIG_FILE = os.path.join(DATA_DIR, "monitor_config.json")
@@ -131,9 +130,21 @@ def guardar_config(config: dict):
             json.dump(config, f, indent=4, ensure_ascii=False)
         os.replace(tmp, CONFIG_FILE)
 
-        # Reiniciar el servicio para aplicar cambios
-        toggle_monitoreo(False)
-        toggle_monitoreo(True)
+        # --- v4.4: Reinicio ordenado para aplicar cambios ---
+        # Antes se hacía toggle_monitoreo(False) seguido de toggle_monitoreo(True),
+        # que era un taskkill /F + un arranque inmediato. El proceso viejo podía
+        # seguir liberando recursos cuando el nuevo intentaba tomar el candado, y
+        # el agente quedaba apagado sin aviso. Ahora esperamos la confirmación
+        # del SCM antes de volver a levantarlo.
+        res = service_control.reiniciar()
+        if not res.get("success"):
+            return {
+                "success": True,
+                "warning": True,
+                "msg": ("La configuración se guardó correctamente, pero el servicio "
+                        f"no pudo reiniciarse: {res.get('msg')}"),
+            }
+
         return {"success": True}
 
     except Exception as e:
@@ -143,43 +154,36 @@ def guardar_config(config: dict):
 # ---------------------------------------------------------------------------
 # CONTROL DEL SERVICIO
 # ---------------------------------------------------------------------------
+# v4.4: el agente es un servicio de Windows (TecnoMonitorAgent). Toda la
+# interacción pasa por el SCM en vez de schtasks/taskkill, así que ya no
+# dependemos de que haya una sesión interactiva abierta ni de parsear la
+# salida de `sc` (que cambia según el idioma del Windows del hospital).
+# ---------------------------------------------------------------------------
 @eel.expose
 def toggle_monitoreo(activar: bool):
-    try:
-        if activar:
-            res = subprocess.run(
-                ["schtasks", "/Run", "/TN", "TecnoMonitor_AutoStart"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if res.returncode != 0:
-                return {"success": False, "msg": "Requiere privilegios de Administrador para iniciar el servicio."}
-        else:
-            res = subprocess.run(
-                ["taskkill", "/F", "/IM", "TecnoMonitorService.exe", "/T"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if res.returncode == 5:
-                return {"success": False, "msg": "Requiere privilegios de Administrador para detener el servicio."}
-        return {"success": True}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "msg": "Timeout al ejecutar el comando."}
-    except Exception as e:
-        return {"success": False, "msg": str(e)}
+    return service_control.iniciar() if activar else service_control.detener()
 
 
 @eel.expose
 def check_service_status():
-    try:
-        for proc in psutil.process_iter(['name', 'cmdline']):
-            name    = proc.info.get('name', '')
-            cmdline = proc.info.get('cmdline') or []
-            if name == "TecnoMonitorService.exe":
-                return True
-            if any("headless_service.py" in arg for arg in cmdline):
-                return True
-    except Exception:
-        pass
-    return False
+    """True sólo si el SCM reporta el servicio en ejecución."""
+    return service_control.esta_corriendo()
+
+
+@eel.expose
+def estado_servicio_detallado():
+    """
+    Estado textual para el badge de la GUI.
+
+    Distingue 'Detenido' de 'No instalado', que con la detección por psutil de
+    la v4.3 se veían igual y mandaban al técnico a buscar el problema donde no
+    estaba.
+    """
+    return {
+        "estado":    service_control.estado_legible(),
+        "instalado": service_control.esta_instalado(),
+        "corriendo": service_control.esta_corriendo(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +210,7 @@ def leer_log_delta(posicion_anterior: int):
             if posicion_anterior > tamano_total:
                 posicion_anterior = 0
             f.seek(posicion_anterior)
-            contenido     = f.read()
+            contenido      = f.read()
             nueva_posicion = f.tell()
         return {"content": contenido, "pos": nueva_posicion}
     except Exception as e:
@@ -260,14 +264,21 @@ def reset_historial_sql():
     except Exception:
         return False
 
+
 @eel.expose
 def test_ssl_gui(data):
     return agent_logic.test_ssl_gui(data)
+
 
 # --- NUEVO v4.3: Test ElasticSearch ---
 @eel.expose
 def test_elastic_gui(data):
     return agent_logic.test_connection_elastic(data)
+
+@eel.expose
+def test_dicom_index_gui(data):
+    return agent_logic.test_connection_dicom_index(data)
+
 
 # ---------------------------------------------------------------------------
 # ARRANQUE

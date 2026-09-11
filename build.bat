@@ -1,38 +1,68 @@
 @echo off
 setlocal enabledelayedexpansion
 
-TITLE TecnoMonitor - SRE Automated Build System (v4.3 Sentinel)
+TITLE TecnoMonitor - SRE Automated Build System (v4.4.1 Sentinel)
 COLOR 0B
 
 echo ===================================================================
-echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v4.3 Sentinel
+echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v4.4.1 Sentinel
 echo ===================================================================
 echo.
 
+:: 0. Verificacion de dependencias nuevas de la v4.4
+echo [0/4] Verificando pywin32...
+python -c "import win32serviceutil" 2>nul
+if errorlevel 1 (
+    echo       [FALLO] Falta pywin32. Instalalo con:
+    echo               pip install pywin32
+    echo               python Scripts\pywin32_postinstall.py -install
+    pause
+    exit /b 1
+)
+echo       pywin32 presente.
+
 :: 1. Limpieza de artefactos previos
+echo.
 echo [1/4] Limpiando directorios de compilacion anteriores...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist Output rmdir /s /q Output
 echo       Limpieza completada con exito.
 
-:: 2. Compilación del Servicio Headless (Background Engine)
+:: 2. Compilacion del Servicio de Windows
+::
+::    IMPORTANTE: --onedir, NO --onefile.
+::    El bootloader de onefile se re-lanza como proceso hijo; el SCM registra
+::    el PID del padre y pierde el canal de control, con lo cual el servicio
+::    no responde a stop/shutdown y Windows lo mata por timeout.
+::
+::    --hidden-import win32timezone: pywin32 lo carga de forma dinamica y el
+::    analizador estatico de PyInstaller no lo ve. Sin el, el servicio arranca
+::    y muere al primer uso de fechas.
 echo.
-echo [2/4] Compilando TecnoMonitorService.exe (Motor de Segundo Plano)...
-pyinstaller --noconfirm --noconsole --onefile ^
+echo [2/4] Compilando TecnoMonitorService (Servicio de Windows, modo onedir)...
+pyinstaller --noconfirm --noconsole --onedir ^
     --name "TecnoMonitorService" ^
+    --hidden-import win32timezone ^
+    --hidden-import win32serviceutil ^
+    --hidden-import win32service ^
+    --hidden-import win32event ^
+    --hidden-import servicemanager ^
     --add-data "rules.json;." ^
     headless_service.py
 
 if errorlevel 1 goto ERROR_EXIT
-echo       TecnoMonitorService.exe generado correctamente en dist\
+echo       dist\TecnoMonitorService\TecnoMonitorService.exe generado correctamente
 
-:: 3. Compilación de la Interfaz Gráfica con Privilegios de Admin (--uac-admin)
+:: 3. Compilacion de la Interfaz Grafica con Privilegios de Admin (--uac-admin)
+::    La GUI ahora habla con el SCM via pywin32, no con schtasks/taskkill.
 echo.
 echo [3/4] Compilando TecnoMonitorConfig.exe (Panel de Control GUI con UAC)...
 pyinstaller --noconfirm --windowed --onefile --uac-admin ^
     --name "TecnoMonitorConfig" ^
     --icon "logo.ico" ^
+    --hidden-import win32serviceutil ^
+    --hidden-import win32service ^
     --add-data "web;web" ^
     --add-data "rules.json;." ^
     main_gui.py
@@ -40,7 +70,7 @@ pyinstaller --noconfirm --windowed --onefile --uac-admin ^
 if errorlevel 1 goto ERROR_EXIT
 echo       TecnoMonitorConfig.exe generado correctamente en dist\
 
-:: 4. Búsqueda automática de Inno Setup (ISCC.exe) y generación del Instalador
+:: 4. Busqueda automatica de Inno Setup (ISCC.exe) y generacion del Instalador
 echo.
 echo [4/4] Buscando Inno Setup y empaquetando instalador final...
 
@@ -61,8 +91,8 @@ if errorlevel 1 goto ERROR_EXIT
 
 echo.
 echo ===================================================================
-echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v4.3 Sentinel)
-echo   Artefacto listo en: Output\TecnoMonitor_v4.3_Sentinel_Setup.exe
+echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v4.4.1 Sentinel)
+echo   Artefacto listo en: Output\TecnoMonitor_v4.4.1_Sentinel_Setup.exe
 echo ===================================================================
 pause
 exit /b 0
@@ -71,7 +101,8 @@ exit /b 0
 echo.
 echo ===================================================================
 echo   COMPILACION DE BINARIOS EXITOSA (Sin instalador Inno Setup)
-echo   Binarios ubicados en: dist\
+echo   Servicio : dist\TecnoMonitorService\
+echo   GUI      : dist\TecnoMonitorConfig.exe
 echo ===================================================================
 pause
 exit /b 0

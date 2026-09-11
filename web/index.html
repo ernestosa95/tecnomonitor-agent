@@ -105,7 +105,7 @@
     <div class="header-bar d-flex justify-content-between align-items-center shadow">
         <div>
             <h3 class="mb-0 fw-bold">TecnoMonitor Agent</h3>
-            <small class="text-white-50">Configuración Local v4.3</small>
+            <small class="text-white-50">Configuración Local v4.4</small>
         </div>
         <div id="service_status_badge">
             <span class="badge bg-secondary">Cargando estado...</span>
@@ -316,24 +316,6 @@
                                    oncopy="return false" oncut="return false" autocomplete="new-password">
                         </div>
 
-                        <!-- NUEVO: Sub-ítem para Autoenrute DICOM -->
-                        <div class="col-md-12 mt-3">
-                            <div class="p-3 border rounded bg-light">
-                                <div class="form-check form-switch d-flex align-items-center m-0">
-                                    <input class="form-check-input fs-4 mt-0 me-3" type="checkbox" id="enabled_dicom_routing">
-                                    <div>
-                                        <label class="form-check-label fw-bold text-primary mb-0" for="enabled_dicom_routing">
-                                            Monitorear Colas de Autoenrute DICOM
-                                        </label>
-                                        <small class="text-muted d-block mt-1">
-                                            Habilita la recolección de métricas de infraestructura de red. Requiere permisos de SELECT sobre <code>DICOMAUTOROUTINGQUEUE</code>.
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- FIN NUEVO -->
-
                         <div class="col-md-3 mt-3">
                             <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
                             <input type="number" class="form-control" id="sql_exec_day" value="3" min="1" max="24">
@@ -410,7 +392,7 @@
             <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
                 <h5 class="mb-0 text-primary" style="cursor: pointer;"
                     data-bs-toggle="collapse" data-bs-target="#collapse_8">
-                    <i class="fas fa-search-location me-2"></i>8. Monitoreo de Logs (ElasticSearch)
+                    <i class="fas fa-search-location me-2"></i>8. ElasticSearch (Logs y Autoenrute)
                     <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
                 </h5>
                 <div class="form-check form-switch">
@@ -421,7 +403,7 @@
             <div id="collapse_8" class="collapse">
                 <div class="card-body" id="elastic_body" style="opacity: 0.5; pointer-events: none;">
                     <p class="text-muted small mb-3">
-                        Configura la conexión al motor de ElasticSearch para analizar proactivamente los logs de errores de Suitestensa.
+                        Configura la conexión al motor de ElasticSearch para analizar proactivamente los logs de errores de Suitestensa y leer el estado de las colas de autoenrute DICOM.
                     </p>
                     <div class="row g-3">
                         <div class="col-md-5">
@@ -430,7 +412,13 @@
                         </div>
                         <div class="col-md-3">
                             <label class="form-label text-muted small fw-bold">Puerto</label>
-                            <input type="number" class="form-control" id="elastic_port" placeholder="9200" value="9200">
+                            <input type="number" class="form-control" id="elastic_port" placeholder="29200" value="9200">
+                            <small class="text-muted d-block mt-1">Instalaciones Estensa suelen usar 29200.</small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small fw-bold">Patrón de Índice (Logs)</label>
+                            <input type="text" class="form-control" id="elastic_index_pattern"
+                                   placeholder="se-es-logging-*" value="se-es-logging-*">
                         </div>
                         <div class="col-md-6 mt-3">
                             <label class="form-label text-muted small fw-bold">Usuario</label>
@@ -446,6 +434,50 @@
                                 </button>
                             </div>
                         </div>
+
+                        <!-- Sub-ítem: Autoenrute DICOM (movido desde la tarjeta SQL) -->
+                        <div class="col-md-12 mt-3">
+                            <div class="p-3 border rounded bg-light">
+                                <div class="form-check form-switch d-flex align-items-center m-0">
+                                    <input class="form-check-input fs-4 mt-0 me-3" type="checkbox" id="enabled_dicom_routing"
+                                           onchange="toggleDicomRouting(this)">
+                                    <div>
+                                        <label class="form-check-label fw-bold text-primary mb-0" for="enabled_dicom_routing">
+                                            Monitorear Colas de Autoenrute DICOM
+                                        </label>
+                                        <small class="text-muted d-block mt-1">
+                                            Lee el estado de las reglas de enrute desde el índice indexado por Logstash.
+                                            Requiere permiso de lectura sobre ese índice para el usuario configurado arriba.
+                                        </small>
+                                    </div>
+                                </div>
+
+                                <div class="row g-3 mt-1" id="dicom_routing_fields" style="opacity: 0.5; pointer-events: none;">
+                                    <div class="col-md-6">
+                                        <label class="form-label text-muted small fw-bold">Índice de Autoenrute</label>
+                                        <input type="text" class="form-control" id="elastic_dicom_index"
+                                               placeholder="ext_dicom_queues" value="ext_dicom_queues">
+                                        <small class="text-muted d-block mt-1">
+                                            Índice de estado actual (upsert por IDRULE), no el histórico.
+                                        </small>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label text-muted small fw-bold">Antigüedad máxima (min)</label>
+                                        <input type="number" class="form-control" id="elastic_dicom_max_age" value="15" min="1">
+                                        <small class="text-muted d-block mt-1">
+                                            Descarta lecturas más viejas: detecta un pipeline caído.
+                                        </small>
+                                    </div>
+                                    <div class="col-md-2 d-flex align-items-start">
+                                        <button class="btn btn-warning text-white w-100 mt-4" onclick="testDicomIndex()">
+                                            <i class="fas fa-plug"></i> Test
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- FIN Sub-ítem -->
+
                     </div>
                 </div>
             </div>

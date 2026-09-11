@@ -32,11 +32,23 @@ function toggleCard(bodyId, checkbox) {
     el.style.opacity       = checkbox.checked ? '1'    : '0.5';
     el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
 
-    // NUEVO: Si se desactiva la tarjeta SQL, desactivamos el autoenrute DICOM por seguridad
-    if (bodyId === 'sql_body' && !checkbox.checked) {
+    // El autoenrute DICOM ahora lee desde ElasticSearch: si se apaga esa
+    // tarjeta, el sub-ítem queda sin fuente de datos y se desactiva.
+    if (bodyId === 'elastic_body' && !checkbox.checked) {
         const dicomRoutingSwitch = document.getElementById('enabled_dicom_routing');
-        if (dicomRoutingSwitch) dicomRoutingSwitch.checked = false;
+        if (dicomRoutingSwitch) {
+            dicomRoutingSwitch.checked = false;
+            toggleDicomRouting(dicomRoutingSwitch);
+        }
     }
+}
+
+// Habilita/deshabilita los campos propios del sub-ítem de autoenrute.
+function toggleDicomRouting(checkbox) {
+    const el = document.getElementById('dicom_routing_fields');
+    if (!el) return;
+    el.style.opacity       = checkbox.checked ? '1'    : '0.5';
+    el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
 }
 
 function toggleHypervisorFields() {
@@ -138,9 +150,6 @@ async function cargarConfiguracion() {
             document.getElementById('sql_pass').value       = cfg.sql.pass || '';
             document.getElementById('sql_exec_day').value   = cfg.sql.executions_per_day || 3;
             document.getElementById('sql_start_date').value = cfg.sql.historical_start_date || '';
-            
-            // NUEVO: Cargar el estado del sub-ítem de autoenrute DICOM
-            document.getElementById('enabled_dicom_routing').checked = cfg.sql.enabled_dicom_routing || false;
         }
         const chkSql = document.getElementById('enable_sql');
         chkSql.checked = !!cfg.enabled_sql;
@@ -168,16 +177,34 @@ async function cargarConfiguracion() {
             cfg.ssl_urls.forEach(urlObj => agregarSSL(urlObj));
         }
 
-        // --- 8. Monitoreo de Logs (Elastic) --- (NUEVO v4.3)
+        // --- 8. ElasticSearch: Logs + Autoenrute --- (v4.4)
         if (cfg.elastic) {
-            document.getElementById('elastic_host').value     = cfg.elastic.host || '';
-            document.getElementById('elastic_port').value     = cfg.elastic.port || 9200;
-            document.getElementById('elastic_user').value     = cfg.elastic.user || '';
-            document.getElementById('elastic_pass').value     = cfg.elastic.pass || '';
+            document.getElementById('elastic_host').value          = cfg.elastic.host || '';
+            document.getElementById('elastic_port').value          = cfg.elastic.port || 9200;
+            document.getElementById('elastic_user').value          = cfg.elastic.user || '';
+            document.getElementById('elastic_pass').value          = cfg.elastic.pass || '';
+            document.getElementById('elastic_index_pattern').value = cfg.elastic.index_pattern || 'se-es-logging-*';
+            document.getElementById('elastic_dicom_index').value   = cfg.elastic.dicom_index || 'ext_dicom_queues';
+            document.getElementById('elastic_dicom_max_age').value = cfg.elastic.dicom_max_age_minutes || 15;
         }
         const chkElastic = document.getElementById('enable_elastic');
         chkElastic.checked = !!cfg.enabled_elastic;
+
+        // COMPATIBILIDAD: hasta v4.3 el flag vivía dentro de cfg.sql.
+        // Sin este fallback, los agentes ya desplegados aparecerían con el
+        // switch apagado y dejarían de reportar en silencio al primer guardado.
+        const dicomRoutingActivo =
+            (cfg.elastic && typeof cfg.elastic.enabled_dicom_routing === 'boolean')
+                ? cfg.elastic.enabled_dicom_routing
+                : !!(cfg.sql && cfg.sql.enabled_dicom_routing);
+
+        const chkDicom = document.getElementById('enabled_dicom_routing');
+        chkDicom.checked = dicomRoutingActivo;
+
+        // toggleCard debe correr DESPUÉS de fijar el sub-switch: si la tarjeta
+        // Elastic está apagada, se encarga de bajarlo por coherencia.
         toggleCard('elastic_body', chkElastic);
+        toggleDicomRouting(chkDicom);
 
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
@@ -253,9 +280,6 @@ async function guardarConfiguracion() {
             pass:                  document.getElementById('sql_pass').value,
             executions_per_day:    parseInt(document.getElementById('sql_exec_day').value) || 3,
             historical_start_date: document.getElementById('sql_start_date').value,
-            
-            // NUEVO: Guardar el estado del sub-ítem de enrute DICOM
-            enabled_dicom_routing: document.getElementById('enabled_dicom_routing').checked
         },
 
         enabled_vms: document.getElementById('enable_vms').checked,
@@ -267,13 +291,19 @@ async function guardarConfiguracion() {
         enabled_ssl: document.getElementById('enable_ssl').checked,
         ssl_urls: ssl_urls,
 
-        // --- NUEVO v4.3: Monitoreo de Logs (ElasticSearch) ---
+        // --- v4.4: ElasticSearch (Logs + Autoenrute DICOM) ---
         enabled_elastic: document.getElementById('enable_elastic').checked,
         elastic: {
-            host: document.getElementById('elastic_host').value.trim(),
-            port: parseInt(document.getElementById('elastic_port').value) || 9200,
-            user: document.getElementById('elastic_user').value.trim(),
-            pass: document.getElementById('elastic_pass').value
+            host:          document.getElementById('elastic_host').value.trim(),
+            port:          parseInt(document.getElementById('elastic_port').value) || 9200,
+            user:          document.getElementById('elastic_user').value.trim(),
+            pass:          document.getElementById('elastic_pass').value,
+            index_pattern: document.getElementById('elastic_index_pattern').value.trim() || 'se-es-logging-*',
+
+            // El flag de autoenrute vive acá desde v4.4 (antes estaba en sql).
+            enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
+            dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
+            dicom_max_age_minutes:  parseInt(document.getElementById('elastic_dicom_max_age').value) || 15,
         }
     };
 
@@ -709,19 +739,24 @@ async function testSSL(btnElement) {
 }
 
 // ---------------------------------------------------------------------------
-// GESTION ELASTIC (LOGS)
+// GESTION ELASTIC (LOGS + AUTOENRUTE)
 // ---------------------------------------------------------------------------
+function _leerConfigElasticDesdeUI() {
+    return {
+        host:        document.getElementById('elastic_host').value.trim(),
+        port:        parseInt(document.getElementById('elastic_port').value) || 9200,
+        user:        document.getElementById('elastic_user').value.trim(),
+        pass:        document.getElementById('elastic_pass').value,
+        dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
+    };
+}
+
 async function testElastic() {
     const btn = window.event?.target?.closest('button');
     let originalText = '<i class="fas fa-plug"></i> Test';
     if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
 
-    const data = {
-        host: document.getElementById('elastic_host').value.trim(),
-        port: parseInt(document.getElementById('elastic_port').value) || 9200,
-        user: document.getElementById('elastic_user').value.trim(),
-        pass: document.getElementById('elastic_pass').value
-    };
+    const data = _leerConfigElasticDesdeUI();
 
     if (!data.host) {
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
@@ -731,6 +766,32 @@ async function testElastic() {
 
     try {
         const res = await eel.test_elastic_gui(data)();
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("Error de comunicación con Python: " + e);
+    }
+}
+
+// Verifica específicamente que el usuario configurado pueda LEER el índice de
+// autoenrute. Un usuario válido para los logs puede no tener permiso sobre
+// ext_dicom_queues, y ese 403 es difícil de diagnosticar en producción.
+async function testDicomIndex() {
+    const btn = window.event?.target?.closest('button');
+    let originalText = '<i class="fas fa-plug"></i> Test';
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+
+    const data = _leerConfigElasticDesdeUI();
+
+    if (!data.host) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+
+    try {
+        const res = await eel.test_dicom_index_gui(data)();
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
     } catch (e) {

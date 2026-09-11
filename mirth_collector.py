@@ -7,7 +7,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def recolectar_mirth(mirth_configs, log_func=None):
     """
     Extrae la telemetría de canales HL7 desde la API REST de Mirth Connect.
-    Estrictamente formateado para cumplir con el Schema v4.1.
+    Actualizado para cruzar estados (statuses) con transacciones (statistics).
     """
     resultados = {}
     meta_status = "ok"
@@ -25,7 +25,7 @@ def recolectar_mirth(mirth_configs, log_func=None):
         canales_data = []
         try:
             s = requests.Session()
-            # Encabezados requeridos por Mirth para la API REST
+            # Encabezados requeridos por Mirth para evitar rechazos por CSRF
             s.headers.update({
                 'X-Requested-With': 'OpenAPI', 
                 'Accept': 'application/json'
@@ -35,7 +35,24 @@ def recolectar_mirth(mirth_configs, log_func=None):
             login_req = s.post(f"{url}/api/users/_login", data={'username': user, 'password': pwd}, verify=False, timeout=10)
             login_req.raise_for_status()
             
-            # 2. Obtener Estados (Robustez ante XML-to-JSON)
+            # 2. Obtener Estadísticas (Para Recibidos y Enviados)
+            r_stats = s.get(f"{url}/api/channels/statistics", verify=False, timeout=15)
+            r_stats.raise_for_status()
+            stats_data = r_stats.json().get('list', {}).get('channelStatistics', [])
+            if isinstance(stats_data, dict): 
+                stats_data = [stats_data]
+                
+            # Mapear estadísticas por channelId para un cruce eficiente O(1)
+            mapa_estadisticas = {}
+            for stat in stats_data:
+                cid = stat.get('channelId')
+                if cid:
+                    mapa_estadisticas[cid] = {
+                        "received": int(stat.get('received', 0)),
+                        "sent": int(stat.get('sent', 0))
+                    }
+
+            # 3. Obtener Estados (Robustez ante XML-to-JSON)
             r_stat = s.get(f"{url}/api/channels/statuses", verify=False, timeout=15)
             r_stat.raise_for_status()
             data = r_stat.json()
@@ -45,6 +62,7 @@ def recolectar_mirth(mirth_configs, log_func=None):
                 dash_status = [dash_status]
             
             for status in dash_status:
+                channel_id = status.get('channelId')
                 name  = status.get('name', 'Unknown')
                 state = status.get('state', 'UNKNOWN')
                 
@@ -64,15 +82,20 @@ def recolectar_mirth(mirth_configs, log_func=None):
                     elif st_type == 'ERROR':
                         errors_count = st_val
                 
-                # Payload ESTRICTO v4.1 (Eliminamos received y sent)
+                # Rescatamos received y sent del mapa usando el ID del canal
+                metricas_tx = mapa_estadisticas.get(channel_id, {"received": 0, "sent": 0})
+                
+                # Payload con transacciones integradas para que Tecnomonitor las grafique
                 canales_data.append({
                     "channel": name,
                     "status": state,
                     "queued": queued,
+                    "received": metricas_tx["received"],
+                    "sent": metricas_tx["sent"],
                     "last_error": f"Errores acumulados: {errors_count}" if errors_count > 0 else ""
                 })
             
-            # 3. Logout
+            # 4. Logout
             s.post(f"{url}/api/users/_logout", verify=False, timeout=5)
             resultados[alias] = canales_data
             
@@ -86,6 +109,8 @@ def recolectar_mirth(mirth_configs, log_func=None):
                 "channel": "SYSTEM_ERROR", 
                 "status": "ERROR", 
                 "queued": 0, 
+                "received": 0,
+                "sent": 0,
                 "last_error": str(e)[:100]
             }]
     

@@ -140,6 +140,23 @@ def parse_wmi_date(wmi_date):
     except Exception:
         return datetime.now()
 
+def _dicom_routing_habilitado(config):
+    """
+    Compatibilidad de configuración (v4.3 -> v4.4).
+
+    Hasta v4.3 el flag de autoenrute vivía en config["sql"]["enabled_dicom_routing"],
+    porque el colector leía SQL Server directo. Desde v4.4 lee ElasticSearch y el
+    flag pasó a config["elastic"]["enabled_dicom_routing"].
+
+    Los agentes ya desplegados tienen el valor viejo guardado; sin este fallback
+    dejarían de reportar en silencio hasta que alguien reguarde la configuración.
+    Se puede eliminar cuando todos los hospitales estén confirmados en v4.4.
+    """
+    elastic = config.get("elastic") or {}
+    if "enabled_dicom_routing" in elastic:
+        return bool(elastic.get("enabled_dicom_routing"))
+    return bool((config.get("sql") or {}).get("enabled_dicom_routing"))
+
 # ---------------------------------------------------------------------------
 # CHECKPOINT SQL — escritura atómica, guardado solo al confirmar envío exitoso
 # ---------------------------------------------------------------------------
@@ -259,33 +276,43 @@ def extraer_metricas_sql(sql_config, log_func=None):
             conn.close()
 
 # ---------------------------------------------------------------------------
-# AUTOENRUTE DICOM (vía ElasticSearch - índice ext_dicom_queues)
-# Reemplaza la extracción directa por pyodbc contra SQL Server.
+# AUTOENRUTE DICOM (vía ElasticSearch - índice de estado actual)
+#
+# Logstash indexa el índice cada 5 min con upsert por document_id => IDRULE,
+# así que refleja la "foto" del último ciclo y sólo contiene reglas activas
+# (WHERE ACTIVE=1 en el pipeline).
+#
+# A diferencia de la lectura directa a SQL, acá un pipeline caído NO produce
+# error: el índice devuelve los últimos valores conocidos como si fueran
+# actuales. Por eso se controla la antigüedad de cada documento.
 # ---------------------------------------------------------------------------
-def get_dicom_routing_queues(elastic_cfg, log_func=None, index_name="ext_dicom_queues"):
+def get_dicom_routing_queues(elastic_cfg, log_func=None):
     """
-    Lee el estado de las reglas de autoenrute DICOM desde ElasticSearch.
-    Logstash indexa `ext_dicom_queues` cada 5 min (una fila por IDRULE,
-    upsert por document_id), así que el índice ya refleja el último estado
-    y sólo contiene reglas activas (WHERE ACTIVE=1 en el pipeline).
-
-    Devuelve la MISMA estructura que la versión SQL previa para no romper
-    la ingesta ni el resto del pipeline.
+    Devuelve: (routing_queues, status, errores)
+      status: "ok" | "stale" | "empty" | "error"
     """
     if not elastic_cfg or not elastic_cfg.get("host"):
-        return []
+        return [], "error", 1
 
-    host = elastic_cfg.get("host", "").strip()
-    port = elastic_cfg.get("port", 29200)
+    host       = elastic_cfg.get("host", "").strip()
+    port       = elastic_cfg.get("port", 29200)
+    index_name = elastic_cfg.get("dicom_index") or "ext_dicom_queues"
+    try:
+        max_age = int(elastic_cfg.get("dicom_max_age_minutes") or 15)
+    except (TypeError, ValueError):
+        max_age = 15
+
     url  = f"http://{host}:{port}/{index_name}/_search"
-    auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
+    auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) \
+        if elastic_cfg.get("user") else None
 
-    # El índice ya trae una fila por regla activa; ordenamos por pendientes
-    # desc para que los cuellos de botella queden primero.
+    # docvalue_fields fuerza el @timestamp en epoch_millis: no dependemos de
+    # cómo lo serializó el pipeline ni de la zona horaria del servidor.
     payload = {
         "size": 1000,
         "query": {"match_all": {}},
-        "sort": [{"pending_instances": {"order": "desc"}}]
+        "sort": [{"pending_instances": {"order": "desc"}}],
+        "docvalue_fields": [{"field": "@timestamp", "format": "epoch_millis"}],
     }
 
     try:
@@ -295,12 +322,38 @@ def get_dicom_routing_queues(elastic_cfg, log_func=None, index_name="ext_dicom_q
     except Exception as e:
         if log_func:
             log_func(f"⚠️ Error ElasticSearch extrayendo colas de enrute: {e}")
-        return []
+        return [], "error", 1
 
+    if not hits:
+        if log_func:
+            log_func(f"⚠️ Autoenrute DICOM: el índice '{index_name}' no devolvió documentos.")
+        return [], "empty", 0
+
+    ahora_ms       = time.time() * 1000.0
     routing_queues = []
+    descartados    = 0
+    edad_min_vista = None
+
     for hit in hits:
         # Normalizamos claves a minúscula por si cambia lowercase_column_names.
         src = {str(k).lower(): v for k, v in (hit.get("_source") or {}).items()}
+
+        # --- Antigüedad del documento (detecta pipeline de Logstash caído) ---
+        edad_min = None
+        try:
+            dv = (hit.get("fields") or {}).get("@timestamp") or []
+            if dv:
+                edad_min = (ahora_ms - float(dv[0])) / 60000.0
+        except (TypeError, ValueError, IndexError):
+            edad_min = None
+
+        if edad_min is not None:
+            if edad_min_vista is None or edad_min < edad_min_vista:
+                edad_min_vista = edad_min
+            if edad_min > max_age:
+                descartados += 1
+                continue
+
         try:
             pending = int(src.get("pending_instances", 0) or 0)
         except (TypeError, ValueError):
@@ -319,12 +372,89 @@ def get_dicom_routing_queues(elastic_cfg, log_func=None, index_name="ext_dicom_q
                 "hostname": src.get("tonode_hostname"),
             },
             "pending_instances": pending,
+            "snapshot_age_minutes": round(edad_min, 1) if edad_min is not None else None,
         })
 
-    if log_func:
-        log_func(f"✅ Autoenrute DICOM: {len(routing_queues)} reglas leídas de ES ('{index_name}').")
+    # Si TODO lo que había estaba vencido, el pipeline está caído. Devolvemos
+    # lista vacía a propósito: preferimos un hueco visible en el gráfico antes
+    # que una línea plana con datos viejos que parece normal.
+    if descartados and not routing_queues:
+        if log_func:
+            edad_txt = f"{edad_min_vista:.0f} min" if edad_min_vista is not None else "desconocida"
+            log_func(
+                f"❌ Autoenrute DICOM: índice '{index_name}' desactualizado "
+                f"(dato más reciente: {edad_txt}, máximo {max_age} min). "
+                f"Revisar el pipeline de Logstash."
+            )
+        return [], "stale", descartados
 
-    return routing_queues
+    if log_func:
+        extra = f" ({descartados} descartadas por antigüedad)" if descartados else ""
+        log_func(f"✅ Autoenrute DICOM: {len(routing_queues)} reglas leídas de '{index_name}'{extra}.")
+
+    return routing_queues, ("stale" if descartados else "ok"), descartados
+
+
+def test_connection_dicom_index(data):
+    """
+    Test específico del índice de autoenrute (botón de la tarjeta Elastic).
+
+    Existe porque un usuario válido para los logs puede no tener permiso sobre
+    el índice de autoenrute: ese 403 es muy difícil de diagnosticar en producción.
+    Exponer en main_gui.py:
+
+        @eel.expose
+        def test_dicom_index_gui(data):
+            return agent_logic.test_connection_dicom_index(data)
+    """
+    host  = (data.get("host") or "").strip()
+    port  = data.get("port", 29200)
+    index = (data.get("dicom_index") or "ext_dicom_queues").strip()
+
+    if not host:
+        return {"success": False, "msg": "Host de ElasticSearch no configurado"}
+
+    auth = HTTPBasicAuth(data.get("user", ""), data.get("pass", "")) if data.get("user") else None
+    url  = f"http://{host}:{port}/{index}/_search"
+
+    try:
+        r = requests.post(
+            url,
+            json={"size": 1, "docvalue_fields": [{"field": "@timestamp", "format": "epoch_millis"}]},
+            auth=auth, timeout=8
+        )
+    except Exception as e:
+        return {"success": False, "msg": f"Error de conexión: {e}"}
+
+    if r.status_code == 403:
+        return {"success": False,
+                "msg": f"El usuario no tiene permiso de lectura sobre '{index}' (HTTP 403).\n"
+                       f"Agregar el índice al rol asignado a ese usuario."}
+    if r.status_code == 404:
+        return {"success": False,
+                "msg": f"El índice '{index}' no existe (HTTP 404).\n"
+                       f"Verificar que el pipeline de Logstash esté corriendo."}
+    if r.status_code != 200:
+        return {"success": False, "msg": f"HTTP {r.status_code}: {r.text[:200]}"}
+
+    try:
+        hits = r.json().get("hits", {}).get("hits", [])
+    except Exception:
+        return {"success": False, "msg": "Respuesta no interpretable de ElasticSearch"}
+
+    if not hits:
+        return {"success": False, "msg": f"Acceso OK pero el índice '{index}' está vacío."}
+
+    edad_txt = "desconocida"
+    try:
+        dv = (hits[0].get("fields") or {}).get("@timestamp") or []
+        if dv:
+            edad_txt = f"{(time.time() * 1000.0 - float(dv[0])) / 60000.0:.1f} min"
+    except (TypeError, ValueError, IndexError):
+        pass
+
+    return {"success": True,
+            "msg": f"Índice '{index}' accesible. Antigüedad del último dato: {edad_txt}."}
 
 # ---------------------------------------------------------------------------
 # PROXMOX
@@ -1277,13 +1407,15 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "mirth":   {"enabled": config.get("enabled_mirth",   False), "status": "disabled"},
         "ssl_monitoring": {"enabled": config.get("enabled_ssl", False), "status": "disabled"}, # NUEVO
         # --- NUEVO v4.3 ---
-        "suitestensa_logs": {"enabled": config.get("enabled_elastic", False), "status": "disabled"}
+        "suitestensa_logs": {"enabled": config.get("enabled_elastic", False), "status": "disabled"},
+        # --- NUEVO v4.4: permite distinguir "apagado" de "activo sin datos" ---
+        "dicom_routing": {"enabled": _dicom_routing_habilitado(config), "status": "disabled"},
     }
 
     reporte = {
         "envelope": {
             "schema_version": "4.3",
-            "agent_version":  "4.3.1",
+            "agent_version":  "4.4.0",
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },
@@ -1367,8 +1499,24 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["sql"]["block_end"]   = payload.get("application_metrics", {}).get("end_time_extraction", "")
 
     # --- 5.5. Software Monitoring: Autoenrute DICOM (vía ElasticSearch) ---
-    if config.get("sql", {}).get("enabled_dicom_routing") and config.get("elastic", {}).get("host"):
-        reporte["software_monitoring"]["dicom_routing_queues"] = get_dicom_routing_queues(config.get("elastic"), log_callback)
+    # El gate depende de la tarjeta Elastic, que es de donde sale la conexión.
+    if (config.get("enabled_elastic")
+            and _dicom_routing_habilitado(config)
+            and config.get("elastic", {}).get("host")):
+        try:
+            dicom_data, d_status, d_errors = get_dicom_routing_queues(
+                config.get("elastic"), log_callback
+            )
+            reporte["software_monitoring"]["dicom_routing_queues"] = dicom_data
+            collection_meta["dicom_routing"]["status"] = d_status
+            collection_meta["dicom_routing"]["total"]  = len(dicom_data)
+            collection_meta["dicom_routing"]["errors"] = d_errors
+        except Exception as e:
+            reporte["software_monitoring"]["dicom_routing_queues"] = []
+            collection_meta["dicom_routing"]["status"] = "error"
+            collection_meta["dicom_routing"]["error"]  = str(e)
+            if log_callback:
+                log_callback(f"❌ Error autoenrute DICOM: {e}")
     else:
         reporte["software_monitoring"]["dicom_routing_queues"] = []
 
