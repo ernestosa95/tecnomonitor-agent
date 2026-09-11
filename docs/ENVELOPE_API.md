@@ -32,10 +32,12 @@ los checkpoints de SQL y Elastic (ver [MODULOS.md](./MODULOS.md)).
 }
 ```
 
-> Nota: `schema_version` (`"4.3"`) y `agent_version` (`"4.4.0"`) están hardcodeados como
-> literales en `ejecutar_ciclo_agente()`; no se derivan automáticamente de la versión real del
-> instalador (`4.4.1` en `TecnoMonitor.iss`). Si el servidor central usa `schema_version` para
-> decidir cómo parsear el payload, tenerlo presente al planear futuros cambios de esquema.
+> Nota: desde v4.5.0, `schema_version` y `agent_version` (ambos `"4.5.0"`/`"4.5"`, hardcodeados
+> como literales en `ejecutar_ciclo_agente()`) están alineados con el `AppVersion` del
+> instalador — ver [BUILD.md](./BUILD.md#versionado). Siguen sin derivarse automáticamente de
+> un único lugar: si se cambia uno hay que actualizar los tres a mano. `schema_version` no es
+> cosmético — el servidor central lo usa para decidir cómo parsear el payload y, desde `"4.5"`,
+> para exigir el token de autenticación (ver el contrato de ingesta del servidor).
 
 ## `collection_meta`
 

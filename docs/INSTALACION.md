@@ -10,27 +10,44 @@
 - Conectividad saliente HTTPS hacia `central_url` (servidor central) y hacia cada integración
   habilitada (Proxmox/vCenter, iDRAC, SQL Server, Mirth, ElasticSearch, URLs SSL a monitorear).
 
-## Qué instala `TecnoMonitor_v4.4.1_Sentinel_Setup.exe`
+## Qué instala `TecnoMonitor_v4.5.0_Setup.exe`
 
 El instalador está definido en [`TecnoMonitor.iss`](../TecnoMonitor.iss) (Inno Setup). Pasos,
 en orden:
 
 1. **`InitializeSetup`** (antes de copiar archivos) — "cirugía" de instalaciones previas:
-   - Detiene y elimina el servicio `TecnoMonitorAgent` si ya existe (v4.4 previa).
-   - Elimina la tarea programada `TecnoMonitor_AutoStart` si existe (rastro de v4.3).
+   - Detiene y elimina el servicio `TecnoMonitorAgent` si ya existe.
+   - Elimina la tarea programada `TecnoMonitorAgent_Task` si existe (una instalación 4.5+
+     previa en modo tarea) y `TecnoMonitor_AutoStart` si existe (rastro de v4.3).
    - Mata procesos huérfanos `TecnoMonitorService.exe` / `TecnoMonitorConfig.exe`.
-2. Copia archivos a `{Archivos de programa}\TecnoMonitor`:
-   - `service\` → build completo `--onedir` de `TecnoMonitorService` (el `.exe` + sus DLLs).
+2. **Página nueva (v4.5.0): modo de ejecución.** El wizard pregunta entre:
+   - **Servicio de Windows** (por defecto) — arranca solo, sobrevive a reinicios y cierres de
+     sesión.
+   - **Tarea programada** — sin "ejecutar aunque no haya sesión iniciada" ni "privilegios más
+     altos"; pensada para hospitales cuya política de seguridad bloquea la creación de
+     servicios nuevos. Se detiene al cerrar sesión/reiniciar hasta que alguien vuelva a
+     loguearse. El instalador en sí sigue exigiendo admin en ambos casos (`PrivilegesRequired=admin`
+     no cambia según la elección) — ver [ARQUITECTURA.md](./ARQUITECTURA.md#modos-de-ejecución-servicio-vs-tarea-programada-v450).
+3. Copia archivos a `{Archivos de programa}\TecnoMonitor`:
+   - `service\` → build completo `--onedir` de `TecnoMonitorService` (el `.exe` + sus DLLs;
+     el mismo binario sirve ambos modos).
    - `TecnoMonitorConfig.exe` → GUI, un único ejecutable portable.
    - `logo.ico`.
-3. Registra el servicio: `TecnoMonitorService.exe --startup auto install`.
-4. Configura arranque **retrasado** (`sc config TecnoMonitorAgent start= delayed-auto`) para no
-   competir por I/O y red con el resto de los servicios del hospital durante el boot.
-5. Configura **recuperación automática ante caídas**: hasta 3 reinicios (al minuto de cada
-   falla), con el contador de fallos reseteándose cada 24 h
-   (`sc failure ... reset= 86400 actions= restart/60000/restart/60000/restart/60000`).
-6. Arranca el servicio inmediatamente (`sc start TecnoMonitorAgent`), sin esperar al próximo
-   reinicio del equipo.
+4. **Si se eligió Servicio:**
+   - Registra el servicio: `TecnoMonitorService.exe --startup auto install`.
+   - Configura arranque **retrasado** (`sc config TecnoMonitorAgent start= delayed-auto`) para
+     no competir por I/O y red con el resto de los servicios del hospital durante el boot.
+   - Configura **recuperación automática ante caídas**: hasta 3 reinicios (al minuto de cada
+     falla), con el contador de fallos reseteándose cada 24 h
+     (`sc failure ... reset= 86400 actions= restart/60000/restart/60000/restart/60000`).
+   - Arranca el servicio inmediatamente (`sc start TecnoMonitorAgent`), sin esperar al próximo
+     reinicio del equipo.
+5. **Si se eligió Tarea programada:** registra la tarea (`TecnoMonitorService.exe install-task`,
+   ver [task_control.py](../task_control.py)) — ya queda habilitada con un intervalo por
+   defecto de 5 minutos; la GUI ajusta ese intervalo al valor real la primera vez que se guarda
+   la configuración.
+6. Escribe `install_mode.txt` (`"service"` o `"task"`) en `%PROGRAMDATA%\TecnoMonitor` — lo lee
+   `service_control.py` para saber a quién despachar en tiempo de ejecución.
 7. Ofrece abrir la GUI de configuración al terminar (`postinstall`, opcional).
 8. Crea accesos directos en el Menú Inicio y, si se marcó la tarea, en el Escritorio.
 
@@ -45,10 +62,13 @@ start/stop/shutdown. Ver [BUILD.md](./BUILD.md).
 
 ## Desinstalación
 
-`[UninstallRun]` en el `.iss`:
+`[UninstallRun]` en el `.iss` intenta la limpieza de **ambos modos**, sin importar cuál se usó
+— el desinstalador no tiene disponible la elección del wizard de instalación, y borrar algo que
+no existe (un servicio o una tarea que nunca se registraron) es un no-op inofensivo:
 
-1. Detiene el servicio.
-2. Lo desregistra (`TecnoMonitorService.exe remove`).
+1. Detiene el servicio (si existe) y lo desregistra (`TecnoMonitorService.exe remove`).
+2. Desregistra la tarea programada (si existe) — `TecnoMonitorService.exe remove-task`, más un
+   `schtasks /Delete` de respaldo por si el `.exe` ya no estuviera disponible.
 3. Mata la GUI si estaba abierta.
 4. Limpia cualquier resto de la tarea programada `TecnoMonitor_AutoStart` de v4.3.
 
@@ -78,4 +98,6 @@ detectan mutuamente — si conviven, duplican telemetría y corrompen los checkp
    [CONFIGURACION.md](./CONFIGURACION.md) para el detalle de cada campo).
 5. Usar los botones "Test conexión" de cada tarjeta antes de guardar, para validar
    credenciales/conectividad sin esperar al primer ciclo real.
-6. Guardar — esto reinicia el servicio automáticamente para aplicar los cambios.
+6. Guardar — en modo servicio esto lo reinicia automáticamente; en modo tarea reconfigura el
+   intervalo de repetición de la tarea con el valor guardado (ver
+   [ARQUITECTURA.md](./ARQUITECTURA.md#modos-de-ejecución-servicio-vs-tarea-programada-v450)).

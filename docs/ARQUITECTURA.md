@@ -32,16 +32,46 @@ Hay **dos procesos independientes** que comparten el mismo `monitor_config.json`
 comunican directamente entre sí:
 
 1. **`TecnoMonitorConfig.exe`** (GUI): solo se ejecuta cuando un administrador la abre. Sirve
-   para configurar el agente y para arrancar/detener/reiniciar el servicio a través del SCM
-   de Windows. No recolecta ni envía telemetría.
-2. **`TecnoMonitorService.exe`** (servicio de Windows, nombre de servicio `TecnoMonitorAgent`):
-   corre en segundo plano de forma permanente, independientemente de si hay una sesión de
-   usuario abierta o si la GUI está corriendo. Es el que hace el trabajo real.
+   para configurar el agente y para arrancar/detener/reiniciar la recolección — a través del
+   SCM de Windows o del Programador de Tareas, según el modo elegido al instalar (ver abajo).
+   No recolecta ni envía telemetría.
+2. **`TecnoMonitorService.exe`** (mismo ejecutable, invocado de dos formas distintas según el
+   modo — ver la sección siguiente): corre en segundo plano y es el que hace el trabajo real.
 
 Esta separación es intencional (ver [CHANGELOG.md](./CHANGELOG.md), migración v4.3→v4.4):
 antes el "agente" era un `while True` lanzado por una tarea programada `ONLOGON`, que dejaba
 de funcionar si nadie iniciaba sesión en el servidor. Convertirlo en un servicio real resuelve
 ese problema de raíz.
+
+## Modos de ejecución: Servicio vs. Tarea Programada (v4.5.0)
+
+Desde v4.5.0, el instalador pregunta qué mecanismo registrar. Ambos usan el mismo binario
+compilado (`TecnoMonitorService.exe`, `--onedir`), invocado de forma distinta:
+
+| | Servicio de Windows (default) | Tarea Programada |
+|---|---|---|
+| Registro | SCM (`sc create`, vía `win32serviceutil`) | Programador de Tareas (API COM `Schedule.Service`, `task_control.py`) |
+| Privilegios para instalar | Administrador (siempre) | Administrador (el instalador entero lo exige igual), pero la tarea en sí queda con permisos estándar, sin "privilegios más altos" |
+| Modelo de ejecución | Un proceso de larga duración (`_bucle()`, `while not self.detener`) | Un proceso efímero por ciclo (`--run-once`), repetido por el propio disparador de la tarea |
+| Sobrevive a logoff/reinicio | Sí | **No** — se detiene hasta que alguien vuelva a iniciar sesión |
+| Recuperación ante crash | `sc failure` (reinicio automático) | Ninguna explícita — el próximo disparo programado simplemente vuelve a intentar |
+| Por qué elegirlo | Caso general | Hospitales cuya política de seguridad bloquea la creación de servicios nuevos (vector de persistencia común), aun permitiendo tareas programadas simples |
+
+El modo elegido se persiste en `%PROGRAMDATA%\TecnoMonitor\install_mode.txt` (`"service"` o
+`"task"`, escrito por `TecnoMonitor.iss`). `service_control.py` lo lee y despacha cada función
+pública (`iniciar`, `detener`, `esta_corriendo`, `estado_legible`, `reiniciar`) a la
+implementación correspondiente (la suya propia para servicio, o `task_control.py` para tarea) —
+`main_gui.py` no necesita saber cuál de las dos está corriendo. Si el archivo no existe
+(instalaciones de antes de v4.5.0), se asume `"service"`.
+
+**Por qué el modo tarea no es simplemente "resucitar la tarea de v4.3"**: aquella lanzaba un
+`while True` de larga duración bajo el Programador de Tareas, con un candado por socket que
+quedaba en `TIME_WAIT`. El modo tarea de v4.5.0 evita esa clase de problema de raíz: cada
+invocación de `--run-once` hace un solo ciclo y sale (ver `ejecutar_un_ciclo()` en
+`headless_service.py`, compartida con el modo servicio) — no hay proceso de larga duración cuyo
+candado se pueda perder. El mutex existente (`Global\TecnoMonitorAgent_SingleInstance`) se toma
+y libera alrededor de ese único ciclo, como defensa adicional junto a la propia protección de
+solapamiento del Programador de Tareas.
 
 ## Ciclo de vida del servicio (`headless_service.py`)
 
@@ -89,6 +119,7 @@ Todo el estado persistente vive en `%PROGRAMDATA%\TecnoMonitor` (`security.get_a
 | `monitor_config.json` | Configuración completa (credenciales cifradas) | GUI (`guardar_config`) |
 | `secret.key` | Clave Fernet para cifrar/descifrar credenciales | `security.py` (autogenerada al primer uso) |
 | `admin.hash` | Hash SHA-256 del código de acceso a la GUI (v4.5+) | `security.py` (autogenerado al primer uso; borrarlo resetea el acceso) |
+| `install_mode.txt` | `"service"` o `"task"` — qué modo de ejecución se eligió al instalar (v4.5+) | `TecnoMonitor.iss` (una sola vez, al instalar); leído por `service_control.py` |
 | `activity.log` (+ `.1`…`.5`) | Log rotativo de actividad (5 MB × 5 archivos) | Servicio |
 | `.sql_checkpoint` | Marca de tiempo hasta donde ya se extrajo del SQL de negocio | Servicio, tras confirmar el envío |
 | `.elastic_checkpoint` | Marca de tiempo del último log de Suitestensa procesado | Servicio, tras confirmar el envío |

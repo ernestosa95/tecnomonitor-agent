@@ -1,40 +1,64 @@
 # Operación y troubleshooting
 
-## Control del servicio
+## Control del servicio o la tarea programada
 
-El servicio de Windows se llama `TecnoMonitorAgent`. Puede controlarse desde:
+Desde v4.5.0 hay dos modos de ejecución (ver
+[ARQUITECTURA.md](./ARQUITECTURA.md#modos-de-ejecución-servicio-vs-tarea-programada-v450)),
+elegido al instalar y guardado en `%PROGRAMDATA%\TecnoMonitor\install_mode.txt`. La GUI
+(`TecnoMonitorConfig.exe`, botón Iniciar/Detener Monitoreo) funciona igual en ambos —
+internamente llama a `service_control.iniciar()`/`.detener()`/`.estado_legible()`, que
+despachan solos a la implementación correcta según ese archivo. Lo que sigue depende de cuál
+esté instalado.
 
-- La GUI (`TecnoMonitorConfig.exe`), botón de Iniciar/Detener Monitoreo — internamente llama a
-  `service_control.iniciar()` / `.detener()`, que usan `win32serviceutil` contra el SCM (no
-  `sc.exe` ni `schtasks`, para no depender de parsear texto que cambia según el idioma del
-  Windows instalado).
-- Directamente por línea de comandos (como administrador), útil si la GUI no arranca:
-  ```
-  sc query TecnoMonitorAgent
-  sc start TecnoMonitorAgent
-  sc stop TecnoMonitorAgent
-  ```
-- Reinstalación/registro manual del servicio (requiere estar en la carpeta `service\` del
-  ejecutable instalado):
-  ```
-  TecnoMonitorService.exe --startup auto install
-  TecnoMonitorService.exe start
-  TecnoMonitorService.exe stop
-  TecnoMonitorService.exe remove
-  ```
+### Modo Servicio
 
-### Tiempos de espera esperables
+El servicio de Windows se llama `TecnoMonitorAgent`. Habla con el SCM vía `win32serviceutil`
+(no `sc.exe` ni `schtasks`, para no depender de parsear texto que cambia según el idioma del
+Windows instalado). Por línea de comandos, útil si la GUI no arranca:
+```
+sc query TecnoMonitorAgent
+sc start TecnoMonitorAgent
+sc stop TecnoMonitorAgent
+```
+Reinstalación/registro manual (requiere estar en la carpeta `service\` del ejecutable instalado):
+```
+TecnoMonitorService.exe --startup auto install
+TecnoMonitorService.exe start
+TecnoMonitorService.exe stop
+TecnoMonitorService.exe remove
+```
 
-- **Arrancar** el servicio puede tardar hasta 30 s (`TIMEOUT_START` en `service_control.py`)
-  antes de que la GUI reporte éxito/fallo.
-- **Detenerlo** puede tardar hasta 60 s (`TIMEOUT_STOP`): el servicio espera a terminar el
-  ciclo de recolección en curso (WMI/iDRAC/SQL/Elastic pueden tardar) antes de salir, en vez de
-  cortarlo a la mitad. Si un ciclo está atascado en una llamada de red sin timeout corto, el
-  stop puede demorar más de lo esperado.
-- Al **guardar la configuración** desde la GUI, se dispara un `reiniciar()` (stop + start
-  secuencial, esperando confirmación de cada paso) y el botón de monitoreo queda bloqueado
-  visualmente por 30 s (`bloquearBotonMonitoreo` en `script.js`) para dar tiempo a que el
-  nuevo proceso termine de levantar.
+**Tiempos de espera esperables:**
+- **Arrancar** puede tardar hasta 30 s (`TIMEOUT_START` en `service_control.py`) antes de que
+  la GUI reporte éxito/fallo.
+- **Detenerlo** puede tardar hasta 60 s (`TIMEOUT_STOP`): espera a terminar el ciclo de
+  recolección en curso (WMI/iDRAC/SQL/Elastic pueden tardar) antes de salir, en vez de cortarlo
+  a la mitad. Si un ciclo está atascado en una llamada de red sin timeout corto, el stop puede
+  demorar más de lo esperado.
+- Al **guardar la configuración**, se dispara un `reiniciar()` (stop + start secuencial,
+  esperando confirmación de cada paso) y el botón de monitoreo queda bloqueado visualmente por
+  30 s (`bloquearBotonMonitoreo` en `script.js`) para dar tiempo a que el nuevo proceso termine
+  de levantar.
+
+### Modo Tarea Programada
+
+La tarea se llama `TecnoMonitorAgent_Task`, visible en el Programador de Tareas de Windows
+(`taskschd.msc`). A diferencia del servicio, **no hay un proceso de larga duración que
+consultar** — cada disparo corre `TecnoMonitorService.exe --run-once`, hace un ciclo, y sale.
+`task_control.py` habla con la API COM del Programador de Tareas (`Schedule.Service`), mismo
+criterio que el servicio de no parsear texto de `schtasks.exe`.
+
+- "Iniciar" = habilitar la tarea + disparar una corrida inmediata. "Detener" = deshabilitarla
+  (un ciclo ya en curso, si lo hay, termina solo — son ciclos cortos por diseño).
+- El badge de estado muestra "Tarea activa"/"Tarea deshabilitada", enriquecido con el resultado
+  del último ciclo (`LastTaskResult`) si algo falló.
+- **Se detiene por completo si nadie tiene una sesión iniciada** (cierre de sesión, reinicio)
+  hasta que alguien vuelva a loguearse — es el trade-off aceptado de este modo, no un bug.
+- Al **guardar la configuración**, no hay stop/start: se reconfigura el intervalo de repetición
+  del trigger de la tarea (`task_control.actualizar_intervalo`) con el `interval_minutes`
+  recién guardado — es instantáneo, sin las esperas de 30/60 s del modo servicio.
+- Diagnóstico manual en el Programador de Tareas: ubicar `TecnoMonitorAgent_Task` en la raíz,
+  pestaña "Historial" para ver corridas pasadas, o botón "Ejecutar" para forzar un ciclo ya.
 
 ## Interpretar mensajes de error comunes de la GUI
 
@@ -43,6 +67,7 @@ El servicio de Windows se llama `TecnoMonitorAgent`. Puede controlarse desde:
 | "Requiere privilegios de Administrador" | La GUI no se abrió con UAC elevado, o el usuario no tiene permisos sobre el SCM | Cerrar y volver a abrir con "Ejecutar como administrador" |
 | "El servicio TecnoMonitorAgent no está instalado..." | Instalación incompleta, o se ejecutó `remove` sin volver a `install` | Reinstalar con el setup, o correr `TecnoMonitorService.exe --startup auto install` como admin |
 | "El servicio ya está en ejecución" / "no estaba en ejecución" | Carrera con otra acción simultánea (poco común) | Ignorar si el estado final es el esperado; refrescar el badge de estado |
+| "La tarea programada no está instalada." (modo Tarea) | Instalación incompleta, o se ejecutó `remove-task` sin volver a `install-task` | Reinstalar con el setup, o correr `TecnoMonitorService.exe install-task` como admin |
 
 ## Logs
 

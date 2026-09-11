@@ -1,6 +1,6 @@
 # Documentación — TecnoMonitor Agent
 
-Índice de documentación técnica del agente de monitoreo TecnoMonitor (v4.4.1 "Sentinel").
+Índice de documentación técnica del agente de monitoreo TecnoMonitor (v4.5.0).
 Esta carpeta describe el sistema **tal como está implementado hoy** en el repositorio;
 no incluye cambios ni propuestas de código, solo documentación de referencia.
 

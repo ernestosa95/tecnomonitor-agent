@@ -9,6 +9,17 @@ como está.
 
 ## v4.5.0
 
+- **El instalador pregunta el modo de ejecución: Servicio de Windows o Tarea Programada.**
+  Pensado para hospitales cuya política de seguridad bloquea la creación de servicios nuevos
+  (vector de persistencia común) aunque sí permita tareas programadas simples. El modo tarea es
+  liviano a propósito (sin "ejecutar aunque no haya sesión iniciada" ni "privilegios más
+  altos") y, a diferencia de la tarea de v4.3, no lanza un `while True` de larga duración: cada
+  disparo corre un solo ciclo (`TecnoMonitorService.exe --run-once`) y sale, repetido por el
+  propio disparador de repetición del Programador de Tareas — evita de raíz la clase de
+  problema que tenía el mecanismo de v4.3 (candado por socket en `TIME_WAIT`). El modo elegido
+  se guarda en `install_mode.txt`; `service_control.py` lo lee y despacha a `task_control.py`
+  (API COM del Programador de Tareas) o al SCM según corresponda, de forma transparente para la
+  GUI. Ver [ARQUITECTURA.md](./ARQUITECTURA.md#modos-de-ejecución-servicio-vs-tarea-programada-v450).
 - **`schema_version` del envelope pasa a `"4.5"`** (antes `"4.3"`), alineado por primera vez con
   `agent_version` (`"4.5.0"`) y con `AppVersion` del instalador (`4.5.0`). Este cambio de
   `schema_version` no es cosmético: activa del lado servidor la exigencia de header
