@@ -1,0 +1,79 @@
+# Instalación
+
+## Requisitos
+
+- Windows con permisos de administrador (el instalador exige `PrivilegesRequired=admin`).
+- Arquitectura x64 (`ArchitecturesInstallIn64BitMode=x64`).
+- Para el módulo VMware: `pyVmomi` debe estar disponible en el entorno de ejecución del agente
+  (se detecta en runtime; si falta, el módulo reporta el error de forma controlada en vez de
+  romper el ciclo completo).
+- Conectividad saliente HTTPS hacia `central_url` (servidor central) y hacia cada integración
+  habilitada (Proxmox/vCenter, iDRAC, SQL Server, Mirth, ElasticSearch, URLs SSL a monitorear).
+
+## Qué instala `TecnoMonitor_v4.4.1_Sentinel_Setup.exe`
+
+El instalador está definido en [`TecnoMonitor.iss`](../TecnoMonitor.iss) (Inno Setup). Pasos,
+en orden:
+
+1. **`InitializeSetup`** (antes de copiar archivos) — "cirugía" de instalaciones previas:
+   - Detiene y elimina el servicio `TecnoMonitorAgent` si ya existe (v4.4 previa).
+   - Elimina la tarea programada `TecnoMonitor_AutoStart` si existe (rastro de v4.3).
+   - Mata procesos huérfanos `TecnoMonitorService.exe` / `TecnoMonitorConfig.exe`.
+2. Copia archivos a `{Archivos de programa}\TecnoMonitor`:
+   - `service\` → build completo `--onedir` de `TecnoMonitorService` (el `.exe` + sus DLLs).
+   - `TecnoMonitorConfig.exe` → GUI, un único ejecutable portable.
+   - `logo.ico`.
+3. Registra el servicio: `TecnoMonitorService.exe --startup auto install`.
+4. Configura arranque **retrasado** (`sc config TecnoMonitorAgent start= delayed-auto`) para no
+   competir por I/O y red con el resto de los servicios del hospital durante el boot.
+5. Configura **recuperación automática ante caídas**: hasta 3 reinicios (al minuto de cada
+   falla), con el contador de fallos reseteándose cada 24 h
+   (`sc failure ... reset= 86400 actions= restart/60000/restart/60000/restart/60000`).
+6. Arranca el servicio inmediatamente (`sc start TecnoMonitorAgent`), sin esperar al próximo
+   reinicio del equipo.
+7. Ofrece abrir la GUI de configuración al terminar (`postinstall`, opcional).
+8. Crea accesos directos en el Menú Inicio y, si se marcó la tarea, en el Escritorio.
+
+### Por qué el servicio se compila `--onedir` y no `--onefile`
+
+El bootloader de PyInstaller en modo `--onefile` descomprime y relanza un **proceso hijo**; el
+SCM de Windows queda con el PID del proceso padre (el bootloader), que no responde a las
+señales de control de servicio. El resultado observado en v4.3 era que Windows terminaba
+matando el servicio por timeout al intentar detenerlo. Con `--onedir`, el ejecutable que el SCM
+registra es el mismo proceso que corre el bucle, así que sí responde correctamente a
+start/stop/shutdown. Ver [BUILD.md](./BUILD.md).
+
+## Desinstalación
+
+`[UninstallRun]` en el `.iss`:
+
+1. Detiene el servicio.
+2. Lo desregistra (`TecnoMonitorService.exe remove`).
+3. Mata la GUI si estaba abierta.
+4. Limpia cualquier resto de la tarea programada `TecnoMonitor_AutoStart` de v4.3.
+
+**Nota:** la desinstalación no borra `%PROGRAMDATA%\TecnoMonitor` (configuración, logs,
+checkpoints, clave de cifrado) — eso queda en el equipo salvo borrado manual. Es una decisión
+de diseño razonable (permite reinstalar sin perder configuración/histórico), pero conviene
+tenerlo presente si se retira el agente de un equipo por motivos de seguridad.
+
+## Migración desde v4.3
+
+v4.3 usaba una tarea programada (`TecnoMonitor_AutoStart`, disparada `ONLOGON`) y un candado
+por socket en `127.0.0.1:64999` para evitar instancias duplicadas. v4.4 migra a un servicio de
+Windows real con un mutex con nombre. El instalador y el propio servicio (`detectar_agente_legacy`
+en `headless_service.py`) están preparados para detectar y avisar si un agente v4.3 sigue vivo
+durante la transición, ya que ambos mecanismos de candado son independientes entre sí y no se
+detectan mutuamente — si conviven, duplican telemetría y corrompen los checkpoints compartidos.
+
+## Primera configuración
+
+1. Abrir `TecnoMonitorConfig.exe` (requiere UAC — se compila con `--uac-admin`).
+2. Ingresar el código de acceso de la GUI (ver [SEGURIDAD.md](./SEGURIDAD.md) sobre este
+   mecanismo y sus límites actuales).
+3. Completar `Hospital ID`, `Auth Token` y `URL del servidor central`.
+4. Habilitar y completar cada tarjeta de integración según corresponda (ver
+   [CONFIGURACION.md](./CONFIGURACION.md) para el detalle de cada campo).
+5. Usar los botones "Test conexión" de cada tarjeta antes de guardar, para validar
+   credenciales/conectividad sin esperar al primer ciclo real.
+6. Guardar — esto reinicia el servicio automáticamente para aplicar los cambios.

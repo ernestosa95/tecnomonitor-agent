@@ -1,0 +1,169 @@
+# Configuración — `monitor_config.json`
+
+Ubicación: `%PROGRAMDATA%\TecnoMonitor\monitor_config.json`. Se lee/escribe únicamente a
+través de la GUI (`cargar_config` / `guardar_config` en `main_gui.py`) y se lee en cada ciclo
+por el servicio (`cargar_config_segura` en `headless_service.py`). Nunca se debería editar a
+mano estando el servicio corriendo (los cambios se pisan al guardar desde la GUI, y las
+contraseñas en texto plano quedarían así hasta el próximo guardado desde la GUI, que las
+vuelve a cifrar).
+
+Los campos marcados **🔒 cifrado** se guardan pasados por `security.encriptar()` (Fernet) y se
+descifran automáticamente al cargar la configuración (`security.desencriptar()`).
+
+## Nivel raíz
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `hospital_id` | string | `"UNKNOWN"` | Identificador del hospital, viaja en `envelope.hospital_id` de cada reporte |
+| `auth_token` | string 🔒 | `""` | Token enviado como `Authorization: Bearer <token>` al servidor central |
+| `central_url` | string | — | Endpoint HTTPS al que se hace `POST` con el envelope completo |
+| `interval_minutes` | int | `5` | Cada cuánto corre un ciclo completo de recolección + envío |
+
+## Proxmox / VMware — `enabled_proxmox` + `proxmox`
+
+Un único bloque cubre ambos hipervisores; `proxmox.type` decide cuál se usa.
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `proxmox.type` | `"proxmox"` \| `"vmware"` | Selector de hipervisor |
+| `proxmox.host` | string | IP/hostname del nodo Proxmox o del vCenter/ESXi |
+| `proxmox.node` | string | Nombre del nodo dentro del cluster (solo Proxmox; no aplica a VMware) |
+| `proxmox.user` | string | Usuario |
+| `proxmox.pass` | string 🔒 | Contraseña |
+
+Ver [MODULOS.md](./MODULOS.md#proxmox--vmware) para qué se recolecta según el tipo.
+
+## iDRAC (Dell) — `enabled_idrac` + `idrac`
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `idrac.ip` | string | IP del iDRAC |
+| `idrac.user` | string | Usuario Redfish |
+| `idrac.pass` | string 🔒 | Contraseña |
+
+## SQL Server (KPIs de negocio) — `enabled_sql` + `sql`
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `sql.host` | string | — | Instancia SQL Server (`ExtensaRadio`/`ExtensaPACS`/`SL_UserAndConfig`) |
+| `sql.db` | string | `"ExtensaRadio"` (sugerido en UI) | Base de datos inicial de conexión |
+| `sql.user` | string | — | Usuario SQL |
+| `sql.pass` | string 🔒 | — | Contraseña |
+| `sql.executions_per_day` | int | `3` | Cuántos bloques por día se extraen (define `interval_hours = 24 / executions_per_day`); si es `<= 0` se fuerza a `3` |
+| `sql.historical_start_date` | string `YYYY-MM-DD` | — | Fecha desde la que arrancar el backfill histórico si no hay checkpoint previo. Si falta o es inválida, se usa el inicio del día actual |
+| `sql.enabled_dicom_routing` | bool | — | **Obsoleto desde v4.4** (ver más abajo) |
+
+Detalle de la extracción (checkpoint, backfill, bloques) en [MODULOS.md](./MODULOS.md#sql-server-kpis-de-negocio).
+
+## Equipos Windows — `enabled_vms` + `vms[]`
+
+Lista de equipos monitoreados vía WMI (VMs, workstations físicas o equipos médicos con Windows).
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `nombre` | string | Nombre manual opcional. Si se deja vacío, se usa el hostname real detectado por WMI (o la IP si WMI falla) |
+| `type` | `"vm"` \| `"ws"` \| `"eq"` | Clasificación del equipo (VM, workstation física, equipo médico) |
+| `ip` | string | IP/hostname para WMI |
+| `user` | string | Usuario con permisos WMI remoto |
+| `pass` | string 🔒 | Contraseña |
+| `servicios` | string (CSV) o lista | Nombres de servicios de Windows a monitorear en ese equipo, ej. `"MSSQLSERVER, Spooler"` |
+
+## Mirth Connect — `enabled_mirth` + `mirth_servers[]`
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `alias` | string | Etiqueta libre para identificar el entorno (aparece como clave en `software_monitoring.mirth`) |
+| `url` | string | URL base de la API REST de Mirth (`https://host:8443`, sin barra final) |
+| `user` | string | Usuario de Mirth |
+| `pass` | string 🔒 | Contraseña |
+
+## Certificados SSL — `enabled_ssl` + `ssl_urls[]`
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `url` | string | URL a monitorear (se usa hostname + puerto, default 443) |
+
+## ElasticSearch (logs + autoenrute DICOM) — `enabled_elastic` + `elastic`
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `elastic.host` | string | — | Host de ElasticSearch |
+| `elastic.port` | int | `9200` en la GUI; el código de logs/autoenrute usa `29200` como fallback interno si la clave faltara | Puerto HTTP de Elastic |
+| `elastic.user` | string | — | Usuario (Basic Auth) |
+| `elastic.pass` | string 🔒 | — | Contraseña |
+| `elastic.index_pattern` | string | `"se-es-logging-*"` | Patrón de índices para el módulo de logs de Suitestensa |
+| `elastic.enabled_dicom_routing` | bool | `false` | Habilita el sub-módulo de autoenrute DICOM (ver más abajo) |
+| `elastic.dicom_index` | string | `"ext_dicom_queues"` | Índice donde Logstash publica el estado de las colas de autoenrute |
+| `elastic.dicom_max_age_minutes` | int | `15` | Antigüedad máxima aceptada de un documento del índice de autoenrute antes de considerarlo obsoleto |
+
+> ⚠️ **Nota de consistencia interna:** el valor por defecto de `elastic.port` difiere según la
+> función: `test_connection_elastic` (botón "Test" genérico) usa `9200` si la clave no está
+> presente, mientras que `get_dicom_routing_queues` y `recolectar_logs_elastic` usan `29200`.
+> En la práctica esto no suele notarse porque la GUI siempre guarda `port` explícitamente
+> (default `9200`), pero es relevante si se edita `monitor_config.json` a mano o se omite el
+> campo.
+
+### Compatibilidad del flag de autoenrute DICOM (v4.3 → v4.4)
+
+Hasta la v4.3, el flag vivía en `sql.enabled_dicom_routing` (el colector leía SQL Server
+directo). Desde v4.4 el autoenrute se lee de ElasticSearch y el flag se movió a
+`elastic.enabled_dicom_routing`. Tanto el backend (`_dicom_routing_habilitado` en
+`agent_logic.py`) como el frontend (`cargarConfiguracion` en `script.js`) tienen un fallback:
+si `elastic.enabled_dicom_routing` no está presente, se usa el valor viejo de
+`sql.enabled_dicom_routing`. Esto evita que agentes ya desplegados con la configuración vieja
+dejen de reportar en silencio hasta que alguien reguarde la configuración. Se puede retirar
+este fallback una vez que todos los hospitales estén confirmados en v4.4 o superior.
+
+## Claves internas transitorias (no se guardan en disco)
+
+`headless_service.py` inyecta estas claves en el diccionario de configuración **en memoria**,
+antes de llamar a `ejecutar_ciclo_agente`, y `agent_logic.py` las consume/limpia durante el
+ciclo. No forman parte del `monitor_config.json` persistido:
+
+| Clave | Origen | Uso |
+|---|---|---|
+| `_sql_data_payload` | `extraer_metricas_sql()` | Payload ya extraído de SQL para el ciclo actual |
+| `_elastic_checkpoint_to_save` | `recolectar_logs_elastic()` | Timestamp a persistir en `.elastic_checkpoint` tras el envío exitoso |
+
+## Ejemplo de estructura completa (valores ilustrativos)
+
+```json
+{
+  "hospital_id": "HOSP-001",
+  "auth_token": "<cifrado>",
+  "central_url": "https://tecnomonitor.tecnoimagen.com.ar/api/ingest",
+  "interval_minutes": 5,
+
+  "enabled_proxmox": true,
+  "proxmox": { "type": "proxmox", "host": "10.0.0.10", "node": "pve", "user": "root@pam", "pass": "<cifrado>" },
+
+  "enabled_idrac": true,
+  "idrac": { "ip": "10.0.0.11", "user": "root", "pass": "<cifrado>" },
+
+  "enabled_sql": true,
+  "sql": {
+    "host": "10.0.0.20", "db": "ExtensaRadio", "user": "sa", "pass": "<cifrado>",
+    "executions_per_day": 3, "historical_start_date": "2026-01-01"
+  },
+
+  "enabled_vms": true,
+  "vms": [
+    { "nombre": "", "type": "vm", "ip": "10.0.0.30", "user": "administrador", "pass": "<cifrado>", "servicios": "MSSQLSERVER, Spooler" }
+  ],
+
+  "enabled_mirth": true,
+  "mirth_servers": [
+    { "alias": "Produccion_Principal", "url": "https://10.0.0.40:8443", "user": "admin", "pass": "<cifrado>" }
+  ],
+
+  "enabled_ssl": true,
+  "ssl_urls": [ { "url": "https://pacs.hospital.com" } ],
+
+  "enabled_elastic": true,
+  "elastic": {
+    "host": "10.0.0.50", "port": 9200, "user": "elastic", "pass": "<cifrado>",
+    "index_pattern": "se-es-logging-*",
+    "enabled_dicom_routing": true, "dicom_index": "ext_dicom_queues", "dicom_max_age_minutes": 15
+  }
+}
+```
