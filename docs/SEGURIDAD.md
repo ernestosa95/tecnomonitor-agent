@@ -29,13 +29,23 @@ pendientes de esta documentación.
 
 ## Acceso a la GUI (`main_gui.py` / `web/index.html`)
 
-- Al abrir la GUI aparece un overlay ("Acceso Restringido") que pide un código. La validación
-  (`verificar_clave`) ocurre en Python: el frontend nunca conoce ni transmite la clave real, solo
-  su hash se compara del lado servidor (`hashlib.sha256`).
-- El hash de referencia (`_ADMIN_HASH`) está **fijo en el código fuente**, con el mismo valor en
-  todas las instalaciones distribuidas (no se deriva de nada específico de cada hospital ni se
-  configura durante la instalación).
-- El mecanismo de Eel expone las funciones marcadas `@eel.expose` (`cargar_config`,
+- **Desde v4.5:** el código de acceso ya no es un hash fijo compartido — se genera al azar
+  (`security.generar_codigo_acceso`, vía el módulo `secrets`) la primera vez que se abre la GUI
+  en cada equipo, y se muestra una única vez en el propio overlay para que el administrador lo
+  guarde. Solo se persiste su hash SHA-256 (`%PROGRAMDATA%\TecnoMonitor\admin.hash`), nunca el
+  texto plano. Esto resuelve el problema anterior (ver Changelog v4.4.1 y anteriores): comprometer
+  una instalación ya no compromete el resto, porque cada equipo tiene un código distinto.
+- **Recuperación de acceso:** si se pierde el código, borrar `admin.hash` con el mismo nivel de
+  acceso local que ya permite leer `secret.key` + `monitor_config.json` y descifrar todo (ver
+  más abajo) regenera un código nuevo al reabrir la GUI. No hay una clave maestra alternativa ni
+  un backdoor de soporte — se apoya en el mismo nivel de acceso que ya es, hoy, equivalente a
+  control total sobre el equipo.
+- **Lockout:** tras 5 intentos fallidos consecutivos, `verificar_clave` (en Python, no solo en
+  el frontend — un lockout puramente en JS sería tan cosmético como los `oncopy`/`oncut` de más
+  abajo) bloquea nuevos intentos durante 60 segundos.
+- La validación (`verificar_clave`) sigue ocurriendo en Python: el frontend nunca conoce ni
+  transmite el código guardado, solo el hash se compara del lado Python.
+- **Limitación que este cambio NO resuelve:** el mecanismo de Eel expone las funciones marcadas `@eel.expose` (`cargar_config`,
   `guardar_config`, `toggle_monitoreo`, los `test_*_gui`, etc.) a través de un servidor
   WebSocket local en cuanto el proceso `TecnoMonitorConfig.exe` arranca — antes de que el
   overlay de la interfaz se resuelva. El overlay controla qué se **muestra** en la página, no
@@ -97,7 +107,7 @@ instalación del servicio podría alterar las reglas de clasificación de errore
 | Área | Mecanismo actual | Protege contra | No protege contra |
 |---|---|---|---|
 | Credenciales en `monitor_config.json` | Cifrado Fernet con clave local | Lectura casual del archivo fuera de su equipo de origen | Acceso local con lectura de `secret.key` + config juntos |
-| Acceso a la GUI | Código fijo, verificado en Python | Que alguien abra la GUI y navegue el formulario sin conocer el código | Invocación directa de funciones expuestas por Eel en el mismo equipo |
+| Acceso a la GUI | Código único por instalación + lockout, verificado en Python | Que alguien abra la GUI y navegue el formulario sin conocer el código, y fuerza bruta local | Invocación directa de funciones expuestas por Eel en el mismo equipo |
 | Envío al servidor central | HTTPS, token Bearer | Lectura pasiva simple en tránsito | MITM activo (no valida certificado del servidor) |
 | Envío a ElasticSearch | HTTP + Basic Auth | Nada frente a un observador de la red | Sniffing de credenciales en la LAN |
 | Certificados SSL monitoreados | Lectura sin validar cadena (por diseño) | — (no es su función proteger, es auditar vigencia) | — |

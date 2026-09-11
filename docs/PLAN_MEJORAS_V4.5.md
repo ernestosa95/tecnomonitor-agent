@@ -25,10 +25,10 @@ primero en la lista porque tienen impacto clínico/operativo directo y el fix es
 |---|---|---|---|---|
 | 1 | ✅ `physical_layer.storage` debería ser `physical_layer.storage_layer` | Alertas RAID (`LOGICAL_VOLUME`/discos físicos) **nunca se evalúan** hoy | Bajo | Corrección/Contrato — **resuelto en agente, ver §1.1** |
 | 2 | ✅ Sensores iDRAC (temp/fans/PSU) reportan `status: "OK"` hardcodeado | Alertas `FAN_<name>` y `PSU_<name>` **nunca pueden disparar** (siempre ven "OK") | Bajo | Corrección/Contrato — **resuelto en agente, ver §1.2** |
-| 3 | Bypass de autenticación local de la GUI (Eel expone funciones antes del login) | Cualquier proceso local puede leer credenciales descifradas | Medio | Seguridad |
-| 4 | Contraseña de admin hardcodeada e igual en todos los hospitales | Compromiso de una instalación compromete todas | Bajo–Medio | Seguridad |
+| 3 | Bypass de autenticación local de la GUI (Eel expone funciones antes del login) | Cualquier proceso local puede leer credenciales descifradas | Medio | Seguridad — **pendiente, ver §3.1** |
+| 4 | ✅ Contraseña de admin hardcodeada e igual en todos los hospitales | Compromiso de una instalación compromete todas | Bajo–Medio | Seguridad — **resuelto, ver §3.2** |
 | 5 | Preparar el agente para auth obligatoria en `schema_version 4.5` del lado servidor | Bloqueante para poder subir de versión de esquema sin romper ingesta | Medio | Contrato/Seguridad |
-| 6 | Un ítem de `application_metrics` mal formado tira abajo **todo el reporte** (incluye infraestructura) | Pérdida de telemetría de infraestructura por un problema de datos de negocio | Medio | Robustez/Contrato |
+| 6 | ✅ Un ítem de `application_metrics` mal formado tira abajo **todo el reporte** (incluye infraestructura) | Pérdida de telemetría de infraestructura por un problema de datos de negocio | Medio | Robustez/Contrato — **resuelto (mitigación local), ver §1.3** |
 | 7 | ElasticSearch por HTTP plano + `verify=False` generalizado | Credenciales e integridad de datos expuestas en la LAN | Medio | Seguridad |
 | 8 | Sin tope de memoria/tiempo en paginación de logs de Elastic | Ciclo puede colgarse o crecer sin límite tras una caída larga | Bajo–Medio | Robustez |
 | 9 | Hilos WMI que exceden el timeout de 90s quedan huérfanos | Fuga de hilos/objetos COM en entornos con equipos lentos | Medio | Robustez |
@@ -110,7 +110,20 @@ sensor de hardware crítico que reporta "todo bien" sin haber mirado el dato.
   lo que el servidor trataría como distinto de `"OK"` y por lo tanto alertable — deseable según
   el criterio del contrato, pero a confirmar contra hardware real (ver checklist, §8).
 
-### 1.3 🟠 Reporte "todo o nada": un dato de negocio malo tumba la telemetría de infraestructura
+### 1.3 ✅ RESUELTO (alternativa de bajo esfuerzo) — Reporte "todo o nada": un dato de negocio malo tumba la telemetría de infraestructura
+
+**Estado:** se implementó la alternativa de bajo esfuerzo descripta más abajo (validación local
+en `extraer_metricas_sql`), no el desacople en dos `POST` — esa sigue pendiente y requeriría
+coordinar con el servidor. Además del riesgo genérico, se identificó y cubrió un caso concreto
+y más probable que el resto: si una de las tres sub-consultas (`ris`/`pacs`/`users`) no matchea
+ninguna fila, SQL Server devuelve `NULL` para esa columna JSON (no `"[]"`), lo que tras
+`json.loads()` deja el campo en `None` en vez de lista vacía — motivo más probable de rechazo
+que un tipo de dato exótico. Se normaliza `None` → `[]` y, para el resto de los casos, se agregó
+una validación estructural (`_validar_application_metrics`) que revisa los campos exigidos por
+el contrato en cada ítem de `ris`/`pacs`/`users`. Si algo no calza, se loguea el detalle exacto
+(índice + campo) y se devuelve `None` desde `extraer_metricas_sql` — mismo camino que ya existía
+para "sin datos este ciclo": el resto del reporte se envía igual, sin `application_metrics`, y
+el checkpoint no avanza (se reintenta el mismo bloque en el próximo ciclo).
 
 El contrato es explícito (§6): si se manda `application_metrics`, **cada ítem de cada lista
 exige todos sus campos** vía validación Pydantic estricta, y "falta un campo tira abajo *todo
@@ -241,13 +254,18 @@ El overlay de "Acceso Restringido" es solo visual; las funciones `@eel.expose` q
 disponibles por WebSocket desde que arranca el proceso, independientemente del login. Mitigar
 con una bandera de sesión server-side (Python) que las funciones sensibles verifiquen antes de
 ejecutar cualquier acción (`cargar_config`, `guardar_config`, `toggle_monitoreo`, etc.), seteada
-recién cuando `verificar_clave` devuelve `True`.
+recién cuando `verificar_clave` devuelve `{"ok": True, ...}`.
 
-### 3.2 Contraseña de admin hardcodeada y compartida (alto)
-Mover a algo generado por instalación (ej. derivado de una semilla única guardada en
-`ProgramData` al instalar, mostrada una vez en el instalador) en vez de un literal en el código
-fuente idéntico en todos los binarios distribuidos. Agregar backoff/bloqueo tras N intentos
-fallidos consecutivos.
+### 3.2 ✅ RESUELTO — Contraseña de admin hardcodeada y compartida (alto)
+
+**Estado:** implementado. `security.py` genera un código único por instalación
+(`generar_codigo_acceso`, vía `secrets`) la primera vez que se necesita, persiste solo su hash
+SHA-256 (`admin.hash`), y `main_gui.py` lo muestra una única vez en el overlay
+(`estado_acceso_gui`). Se agregó además un lockout en Python (no solo JS): 5 intentos fallidos
+consecutivos bloquean `verificar_clave` por 60 segundos. Recuperación de acceso: borrar
+`admin.hash` regenera un código nuevo — sin clave maestra alternativa (ver
+[SEGURIDAD.md](./SEGURIDAD.md#acceso-a-la-gui-main_guipy--webindexhtml)). No incluye una función
+de "cambiar código" en caliente ni resuelve 3.1 (bypass de Eel), que sigue pendiente.
 
 ### 3.3 ElasticSearch por HTTP plano (medio-alto)
 Migrar las URLs de `agent_logic.py` (`recolectar_logs_elastic`, `get_dicom_routing_queues`,
@@ -339,19 +357,16 @@ conservador y reduce el riesgo de 503/timeouts intermitentes en RAID grandes.
 
 No es un compromiso de fechas, es un orden de dependencias e impacto:
 
-1. **Fixes de paridad con el contrato** (§1.1, §1.2) — bajo esfuerzo, reactivan alertas críticas
-   ya diseñadas del lado servidor. Se pueden liberar incluso antes del resto de v4.5 si el
-   proceso de release lo permite, dado que no dependen de ningún cambio de `schema_version`.
-2. **Validación local antes de adjuntar `application_metrics`** (§1.3) — mitiga el riesgo de
-   perder telemetría completa por un dato de negocio malo, independiente de todo lo demás.
+1. ✅ **Fixes de paridad con el contrato** (§1.1, §1.2) — hecho.
+2. ✅ **Validación local antes de adjuntar `application_metrics`** (§1.3) — hecho.
 3. **Coordinación con el equipo de servidor** sobre auth obligatoria (§2) y sobre los supuestos
    de cadencia de Mirth/KPI (§1.5) — son bloqueantes de proceso, no de código, así que conviene
    arrancarlos en paralelo a los puntos 1 y 2, no después.
 4. **Bump controlado a `schema_version: "4.5"`** — solo una vez confirmado por el equipo de
    servidor que la validación de token está desplegada, con el flag de rollback listo (§2,
    punto 5).
-5. **Seguridad de la GUI local** (§3.1, §3.2) — no depende de nada del servidor, se puede hacer
-   en paralelo a todo lo anterior.
+5. **Seguridad de la GUI local** (§3.1, §3.2) — no depende de nada del servidor. ✅ 3.2 hecho;
+   3.1 (bypass de Eel) sigue pendiente.
 6. **Resto de robustez/performance/seguridad** (§3.3–§3.6, §4, §5) — según capacidad, no son
    bloqueantes para el corte de versión pero conviene no acumularlos indefinidamente.
 7. **Higiene de versión** (§6) — antes de compilar el primer build oficial de v4.5, para no
@@ -363,9 +378,11 @@ No es un compromiso de fechas, es un orden de dependencias e impacto:
       servidor y que el dashboard efectivamente muestra estado de RAID.
 - [ ] Forzar una falla real de fan/PSU en un servidor de laboratorio (o simular la respuesta de
       Redfish) y confirmar que la alerta `FAN_<name>`/`PSU_<name>` dispara con el fix de §1.2.
-- [ ] Provocar un dato de negocio inválido a propósito (ej. un valor `NULL` no cubierto) y
-      confirmar que ya no tumba el reporte completo, sino que se maneja según lo definido en
-      §1.3.
+- [x] `_validar_application_metrics`/normalización probados con casos unitarios (None→[],
+      campo faltante, tipo incorrecto, lista con forma equivocada) — ver §1.3. Pendiente:
+      confirmar contra una extracción real de SQL Server con datos de un hospital.
+- [x] Flujo de primera vez / persistencia / lockout / recuperación de `admin.hash` (§3.2)
+      probado de punta a punta simulando reinicios de proceso reales.
 - [ ] Confirmar con el equipo de servidor, por escrito, que la validación de token para
       `schema_version 4.5` está desplegada en producción antes de que cualquier hospital reciba
       el build que la activa.

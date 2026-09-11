@@ -69,8 +69,10 @@ detectan mutuamente — si conviven, duplican telemetría y corrompen los checkp
 ## Primera configuración
 
 1. Abrir `TecnoMonitorConfig.exe` (requiere UAC — se compila con `--uac-admin`).
-2. Ingresar el código de acceso de la GUI (ver [SEGURIDAD.md](./SEGURIDAD.md) sobre este
-   mecanismo y sus límites actuales).
+2. La primera vez, la GUI genera un código de acceso único para ese equipo y lo muestra una
+   sola vez en el propio overlay — **anotarlo antes de continuar**, no se vuelve a mostrar. En
+   aperturas siguientes, se pide ese mismo código (ver [SEGURIDAD.md](./SEGURIDAD.md) para el
+   mecanismo completo, la recuperación si se pierde, y sus límites actuales).
 3. Completar `Hospital ID`, `Auth Token` y `URL del servidor central`.
 4. Habilitar y completar cada tarjeta de integración según corresponda (ver
    [CONFIGURACION.md](./CONFIGURACION.md) para el detalle de cada campo).

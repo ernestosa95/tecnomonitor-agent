@@ -88,6 +88,7 @@ Todo el estado persistente vive en `%PROGRAMDATA%\TecnoMonitor` (`security.get_a
 |---|---|---|
 | `monitor_config.json` | Configuración completa (credenciales cifradas) | GUI (`guardar_config`) |
 | `secret.key` | Clave Fernet para cifrar/descifrar credenciales | `security.py` (autogenerada al primer uso) |
+| `admin.hash` | Hash SHA-256 del código de acceso a la GUI (v4.5+) | `security.py` (autogenerado al primer uso; borrarlo resetea el acceso) |
 | `activity.log` (+ `.1`…`.5`) | Log rotativo de actividad (5 MB × 5 archivos) | Servicio |
 | `.sql_checkpoint` | Marca de tiempo hasta donde ya se extrajo del SQL de negocio | Servicio, tras confirmar el envío |
 | `.elastic_checkpoint` | Marca de tiempo del último log de Suitestensa procesado | Servicio, tras confirmar el envío |
