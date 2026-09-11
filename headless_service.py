@@ -33,11 +33,16 @@ Cambios de la 4.5.0:
     SQL Server directo (elastic.enabled_ris_metrics, coexiste con
     enabled_sql) — ver docs/ELK_RIS_METRICS.md.
 
-Comandos (requiere privilegios de administrador):
+Comandos modo Servicio (requiere privilegios de administrador):
     TecnoMonitorService.exe --startup auto install
     TecnoMonitorService.exe start
     TecnoMonitorService.exe stop
     TecnoMonitorService.exe remove
+
+Comandos modo Tarea Programada (v4.5.0, ver task_control.py):
+    TecnoMonitorService.exe install-task
+    TecnoMonitorService.exe remove-task
+    TecnoMonitorService.exe --run-once   (un solo ciclo — esto es lo que dispara la tarea)
 """
 
 import sys
@@ -293,6 +298,65 @@ def cargar_config_segura():
 
 
 # ---------------------------------------------------------------------------
+# CICLO DE RECOLECCIÓN (compartido entre modo Servicio y modo Tarea)
+#
+# v4.5.0: extraído del bucle del servicio para poder reusarlo tal cual desde
+# la invocación --run-once (modo Tarea Programada, ver task_control.py). El
+# modo Servicio sigue llamando esto en cada vuelta de su bucle infinito; el
+# modo Tarea lo llama una sola vez por invocación y sale — es el Programador
+# de Tareas quien se encarga de repetirlo, no un `while True` propio (eso es
+# justamente lo que le daba problemas a la tarea programada de v4.3).
+# ---------------------------------------------------------------------------
+def ejecutar_un_ciclo(cfg, log_func, debe_continuar=lambda: True):
+    """
+    Un ciclo completo de recolección + envío, dado un cfg ya cargado y
+    desencriptado.
+
+    `debe_continuar` permite al modo Servicio cortar temprano si se pidió
+    detener mientras el módulo SQL/Elastic estaba en curso; en modo Tarea no
+    hay nada que cortar (cada invocación es efímera), así que por defecto
+    siempre sigue.
+    """
+    # --- Módulo SQL (KPIs de negocio): vía Elastic si el hospital ya
+    # migró su Logstash (ver elk/), si no vía SQL Server directo. ---
+    elastic_cfg = cfg.get("elastic") or {}
+    if elastic_cfg.get("enabled_ris_metrics") and elastic_cfg.get("host"):
+        try:
+            sql_data = agent_logic.extraer_metricas_ris_elastic(elastic_cfg, log_func=log_func)
+            if sql_data:
+                cfg["_sql_data_payload"] = sql_data
+            else:
+                log_func("ℹ️ RIS/Elastic: bloque futuro o sin datos nuevos, se omite en este ciclo.")
+        except Exception as e:
+            log_func(f"❌ Error en módulo RIS/Elastic: {e}")
+    elif cfg.get("enabled_sql") and cfg.get("sql"):
+        try:
+            sql_data = agent_logic.extraer_metricas_sql(cfg["sql"], log_func=log_func)
+            if sql_data:
+                cfg["_sql_data_payload"] = sql_data
+            else:
+                log_func("ℹ️ SQL: bloque futuro o sin datos nuevos, se omite en este ciclo.")
+        except Exception as e:
+            log_func(f"❌ Error en módulo SQL: {e}")
+    else:
+        log_func("ℹ️ Módulo SQL desactivado.")
+
+    if not debe_continuar():
+        return
+
+    # --- Ciclo principal ---
+    res = ejecutar_ciclo_agente(cfg, log_callback=log_func)
+
+    if isinstance(res, dict):
+        if res.get("status") == "OK":
+            log_func(f"✅ Ciclo completado y enviado OK — {res.get('timestamp', '')}")
+        else:
+            log_func(f"❌ Fallo en el envío: {res.get('error', 'Error desconocido')}")
+    else:
+        log_func(f"⚠️ Respuesta inesperada del ciclo: {res}")
+
+
+# ---------------------------------------------------------------------------
 # SERVICIO
 # ---------------------------------------------------------------------------
 class TecnoMonitorService(win32serviceutil.ServiceFramework):
@@ -394,43 +458,7 @@ class TecnoMonitorService(win32serviceutil.ServiceFramework):
                         break
                     continue
 
-                # --- Módulo SQL (KPIs de negocio): vía Elastic si el hospital ya
-                # migró su Logstash (ver elk/), si no vía SQL Server directo. ---
-                elastic_cfg = cfg.get("elastic") or {}
-                if elastic_cfg.get("enabled_ris_metrics") and elastic_cfg.get("host"):
-                    try:
-                        sql_data = agent_logic.extraer_metricas_ris_elastic(elastic_cfg, log_func=log)
-                        if sql_data:
-                            cfg["_sql_data_payload"] = sql_data
-                        else:
-                            log("ℹ️ RIS/Elastic: bloque futuro o sin datos nuevos, se omite en este ciclo.")
-                    except Exception as e:
-                        log(f"❌ Error en módulo RIS/Elastic: {e}")
-                elif cfg.get("enabled_sql") and cfg.get("sql"):
-                    try:
-                        sql_data = agent_logic.extraer_metricas_sql(cfg["sql"], log_func=log)
-                        if sql_data:
-                            cfg["_sql_data_payload"] = sql_data
-                        else:
-                            log("ℹ️ SQL: bloque futuro o sin datos nuevos, se omite en este ciclo.")
-                    except Exception as e:
-                        log(f"❌ Error en módulo SQL: {e}")
-                else:
-                    log("ℹ️ Módulo SQL desactivado.")
-
-                if self.detener:
-                    break
-
-                # --- Ciclo principal ---
-                res = ejecutar_ciclo_agente(cfg, log_callback=log)
-
-                if isinstance(res, dict):
-                    if res.get("status") == "OK":
-                        log(f"✅ Ciclo completado y enviado OK — {res.get('timestamp', '')}")
-                    else:
-                        log(f"❌ Fallo en el envío: {res.get('error', 'Error desconocido')}")
-                else:
-                    log(f"⚠️ Respuesta inesperada del ciclo: {res}")
+                ejecutar_un_ciclo(cfg, log, debe_continuar=lambda: not self.detener)
 
                 try:
                     minutos = float(cfg.get("interval_minutes", 5))
@@ -464,6 +492,53 @@ if __name__ == '__main__':
                 f"Este ejecutable no se lanza a mano: usá 'install' y 'start'.",
                 error=True,
             )
+
+    elif sys.argv[1] == '--run-once':
+        # v4.5.0 — modo Tarea Programada: un solo ciclo y sale. Lo repite el
+        # Programador de Tareas por su propio disparador de repetición (ver
+        # task_control.py) — a propósito NO hay un `while True` acá: eso es
+        # justamente lo que le daba problemas a la tarea programada de v4.3
+        # (candado por socket que quedaba en TIME_WAIT).
+        log("🚀 TecnoMonitor Service v4.5.0 — Iniciando (modo tarea programada, --run-once)")
+
+        if detectar_agente_legacy():
+            msg = ("Se detectó un agente v4.3 todavía en ejecución (puerto 64999 "
+                   "ocupado). Se aborta este ciclo para no duplicar telemetría.")
+            log(f"🚨 {msg}")
+            log_evento_windows(msg, error=True)
+            sys.exit(1)
+
+        if not obtener_candado():
+            log("🚨 Ya hay otra instancia del agente corriendo (servicio o tarea). Se aborta este ciclo.")
+            log_evento_windows("Otra instancia ya está activa. Se aborta este ciclo.", error=True)
+            sys.exit(1)
+
+        try:
+            cfg = cargar_config_segura()
+            if not cfg:
+                log("⚠️ Configuración no disponible. Se omite este ciclo.")
+            else:
+                ejecutar_un_ciclo(cfg, log)
+        except Exception:
+            detalle = traceback.format_exc()
+            log(f"💥 Excepción no controlada en el ciclo:\n{detalle}")
+            log_evento_windows(f"Excepción no controlada (modo tarea):\n{detalle}", error=True)
+        finally:
+            liberar_candado()
+            log("👋 Ciclo de tarea programada finalizado.\n")
+
+    elif sys.argv[1] == 'install-task':
+        # Invocado desde TecnoMonitor.iss cuando se elige modo Tarea en el
+        # instalador. 5 minutos de intervalo por defecto (mismo default que
+        # la GUI) hasta que se guarde una configuración real — ver
+        # service_control.reiniciar(), que ajusta el intervalo real.
+        import task_control
+        task_control.instalar(sys.executable, 5)
+
+    elif sys.argv[1] == 'remove-task':
+        import task_control
+        task_control.desinstalar()
+
     else:
-        # install / remove / start / stop / update / debug
+        # install / remove / start / stop / update / debug (modo Servicio)
         win32serviceutil.HandleCommandLine(TecnoMonitorService)

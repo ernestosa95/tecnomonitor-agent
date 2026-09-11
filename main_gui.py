@@ -171,7 +171,10 @@ def guardar_config(config: dict):
         # seguir liberando recursos cuando el nuevo intentaba tomar el candado, y
         # el agente quedaba apagado sin aviso. Ahora esperamos la confirmación
         # del SCM antes de volver a levantarlo.
-        res = service_control.reiniciar()
+        # v4.5.0: en modo tarea programada, el intervalo recién guardado se
+        # necesita acá para reconfigurar el trigger de repetición de la tarea
+        # (ver service_control.reiniciar / task_control.actualizar_intervalo).
+        res = service_control.reiniciar(config.get("interval_minutes", 5))
         if not res.get("success"):
             return {
                 "success": True,

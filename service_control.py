@@ -7,11 +7,25 @@ medio camino y el puerto del candado en TIME_WAIT).
 
 Se habla con el SCM vía pywin32 y no con `sc.exe`, para no depender de
 parsear texto que cambia según el idioma del Windows del hospital.
+
+v4.5.0: el agente ahora puede instalarse como servicio de Windows (lo de
+siempre, este módulo) o como tarea programada liviana, sin privilegios de
+servicio (ver task_control.py y docs/ARQUITECTURA.md) — para hospitales cuya
+política de seguridad bloquea la creación de servicios nuevos. Este módulo
+lee el modo elegido en la instalación (`install_mode.txt`, escrito por
+TecnoMonitor.iss) y despacha a la implementación correspondiente en cada
+función pública, para que main_gui.py no tenga que saber cuál de las dos
+está corriendo.
 """
+
+import os
 
 import win32service
 import win32serviceutil
 import pywintypes
+
+import security
+import task_control
 
 SERVICE_NAME = "TecnoMonitorAgent"
 
@@ -20,6 +34,25 @@ SERVICE_NAME = "TecnoMonitorAgent"
 # antes de salir, en vez de cortarlo por la mitad.
 TIMEOUT_START = 30
 TIMEOUT_STOP  = 60
+
+_MODE_FILE = os.path.join(security.get_app_data_path(), "install_mode.txt")
+
+
+def _modo_instalado() -> str:
+    """
+    "service" o "task", según lo que haya escrito el instalador.
+
+    Si el archivo no existe (instalaciones de antes de v4.5.0, que nunca lo
+    escribieron), se asume "service" — es el único modo que existía.
+    """
+    try:
+        with open(_MODE_FILE, "r", encoding="utf-8") as f:
+            modo = f.read().strip().lower()
+            if modo in ("service", "task"):
+                return modo
+    except Exception:
+        pass
+    return "service"
 
 
 def _mensaje_error(e: pywintypes.error) -> str:
@@ -36,7 +69,7 @@ def _mensaje_error(e: pywintypes.error) -> str:
     return f"{e.strerror} (código {codigo})"
 
 
-def esta_instalado() -> bool:
+def _servicio_esta_instalado() -> bool:
     try:
         win32serviceutil.QueryServiceStatus(SERVICE_NAME)
         return True
@@ -44,7 +77,7 @@ def esta_instalado() -> bool:
         return False
 
 
-def esta_corriendo() -> bool:
+def _servicio_esta_corriendo() -> bool:
     """True sólo si el SCM reporta SERVICE_RUNNING."""
     try:
         estado = win32serviceutil.QueryServiceStatus(SERVICE_NAME)[1]
@@ -55,7 +88,7 @@ def esta_corriendo() -> bool:
         return False
 
 
-def estado_legible() -> str:
+def _servicio_estado_legible() -> str:
     """Estado para mostrar en el badge de la GUI."""
     try:
         estado = win32serviceutil.QueryServiceStatus(SERVICE_NAME)[1]
@@ -77,9 +110,9 @@ def estado_legible() -> str:
     }.get(estado, "Desconocido")
 
 
-def iniciar() -> dict:
+def _servicio_iniciar() -> dict:
     try:
-        if esta_corriendo():
+        if _servicio_esta_corriendo():
             return {"success": True, "msg": "El servicio ya estaba corriendo."}
         win32serviceutil.StartService(SERVICE_NAME)
         win32serviceutil.WaitForServiceStatus(
@@ -94,7 +127,7 @@ def iniciar() -> dict:
         return {"success": False, "msg": str(e)}
 
 
-def detener() -> dict:
+def _servicio_detener() -> dict:
     try:
         win32serviceutil.StopService(SERVICE_NAME)
         win32serviceutil.WaitForServiceStatus(
@@ -109,13 +142,60 @@ def detener() -> dict:
         return {"success": False, "msg": str(e)}
 
 
-def reiniciar() -> dict:
-    """
-    Detiene y vuelve a levantar el servicio para que tome la config nueva.
+# ---------------------------------------------------------------------------
+# API PÚBLICA — despacha según el modo instalado (servicio o tarea)
+# ---------------------------------------------------------------------------
+def esta_instalado() -> bool:
+    if _modo_instalado() == "task":
+        return task_control.esta_instalado()
+    return _servicio_esta_instalado()
 
-    A diferencia de la v4.3, el arranque espera a que el stop se confirme:
-    ya no hay carrera entre matar el proceso y volver a lanzarlo.
+
+def esta_corriendo() -> bool:
+    if _modo_instalado() == "task":
+        return task_control.esta_corriendo()
+    return _servicio_esta_corriendo()
+
+
+def estado_legible() -> str:
+    if _modo_instalado() == "task":
+        return task_control.estado_legible()
+    return _servicio_estado_legible()
+
+
+def iniciar() -> dict:
+    if _modo_instalado() == "task":
+        return task_control.iniciar()
+    return _servicio_iniciar()
+
+
+def detener() -> dict:
+    if _modo_instalado() == "task":
+        return task_control.detener()
+    return _servicio_detener()
+
+
+def reiniciar(interval_minutes=5) -> dict:
     """
+    Aplica la configuración recién guardada.
+
+    Modo servicio: detiene y vuelve a levantar el servicio (como siempre —
+    a diferencia de la v4.3, el arranque espera a que el stop se confirme,
+    así que no hay carrera entre matar el proceso y volver a lanzarlo).
+
+    Modo tarea: no hace falta un stop/start — cada invocación `--run-once`
+    ya relee la config del disco por su cuenta. Lo único que vive fuera del
+    proceso es el intervalo de repetición del propio trigger de la tarea,
+    así que se reconfigura ese trigger con el `interval_minutes` recién
+    guardado (ver task_control.actualizar_intervalo) y se confirma que la
+    tarea siga habilitada.
+    """
+    if _modo_instalado() == "task":
+        res = task_control.actualizar_intervalo(interval_minutes)
+        if not res.get("success"):
+            return res
+        return task_control.iniciar()
+
     res_stop = detener()
     if not res_stop.get("success"):
         return res_stop

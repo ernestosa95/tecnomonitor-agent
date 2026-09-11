@@ -48,6 +48,7 @@ pyinstaller --noconfirm --noconsole --onedir ^
     --hidden-import win32service ^
     --hidden-import win32event ^
     --hidden-import servicemanager ^
+    --hidden-import win32com.client ^
     --add-data "rules.json;." ^
     headless_service.py
 
