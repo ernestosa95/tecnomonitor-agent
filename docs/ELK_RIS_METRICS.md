@@ -68,15 +68,27 @@ agent_logic.extraer_metricas_ris_elastic()  ←  reemplaza a extraer_metricas_sq
    (mismo checkpoint .sql_checkpoint, mismo application_metrics de salida)
 ```
 
-**Agrupados en una sola Tarea Programada** (`ext_kpis_negocio-all-sito.bat`, con un `CALL
-logstash.bat` secuencial por `.conf` — mismo patrón que ya usan los `.bat` "-all-" existentes
-del hospital, ej. `ext_cardiocath-all-sito.bat`), porque los tres comparten la misma cadencia
-(cada 1 hora). Cada `CALL` sigue siendo un proceso Logstash independiente y autocontenido — no
-hay mezcla de datos entre índices, solo se ejecutan uno atrás del otro. Al sumar una medición
-nueva con esta misma cadencia horaria, agregar otro bloque `CALL`/`timeout` a este mismo `.bat`
-en vez de crear una tarea nueva — la cantidad de tareas depende de cuántas **cadencias**
-distintas necesites, no de cuántos `.conf` tengas. `ext_dicom_queues` queda con su propio `.bat`
-y tarea aparte porque necesita una cadencia más agresiva (cada 5 min, no cada 1 hora).
+**Estrategia: agrupar por cadencia, no por dominio.** La cantidad de `.bat`/Tareas Programadas
+depende de cuántas **cadencias** distintas necesitás, no de cuántos `.conf` tengas — sumar una
+medición nueva con una cadencia ya existente es agregar un bloque `CALL`/`timeout` al `.bat` de
+ese cajón, no crear una tarea nueva. Tres cajones definidos hoy (el contenido de cada uno se
+termina de definir por separado, ver [MODULOS.md](./MODULOS.md) y este mismo documento a medida
+que se agreguen más `.conf`):
+
+| Cajón | `.bat` | Disparador de la tarea | Qué vive ahí hoy |
+|---|---|---|---|
+| Tiempo real | `ext_tiempo_real-all-sito.bat` | Repetir cada 5 min | `ext_dicom_queues.conf` |
+| Métricas de negocio | `ext_kpis_negocio-all-sito.bat` | Repetir cada 1 hora | `ext_ris_metrics.conf`, `ext_pacs_metrics.conf`, `ext_users_metrics.conf` |
+| Al reinicio | `ext_al_reinicio-all-sito.bat` | Al iniciar el equipo (sin repetición) | *(pendiente de definir)* |
+
+Cada `CALL` dentro de un `.bat` sigue siendo un proceso Logstash independiente y autocontenido
+— no hay mezcla de datos entre índices, solo se ejecutan uno atrás del otro dentro de la misma
+corrida de la tarea. Mismo patrón que ya usan los `.bat` "-all-" existentes del hospital (ej.
+`ext_cardiocath-all-sito.bat`).
+
+El cajón "al reinicio" es para datos que solo tiene sentido recalcular cuando la VM/servidor
+arranca de nuevo (no una serie de tiempo continua) — el disparador en el Programador de Tareas
+es **"Al iniciar el equipo"**, sin desencadenador de repetición.
 
 ## Mapping de los índices nuevos
 
@@ -128,9 +140,9 @@ y tarea aparte porque necesita una cadencia más agresiva (cada 5 min, no cada 1
   `schedule => "*/5 * * * *"` al `.conf` y no usar el `.bat` de acá. Solo tiene un `output`
   (índice de estado actual) — no incluye el índice histórico que menciona la guía original para
   Kibana, ya que el agente no lo lee y no está en el alcance de este ciclo.
-- `ext_dicom_queues-sito.bat`: calco del patrón `CALL ...\logstash.bat -f ...conf` +
-  `timeout /t 30 /nobreak` de un `.conf` individual, ya usado por varios pipelines del hospital.
-  Necesita su propia Tarea Programada, cadencia cada 5 min.
+- `ext_tiempo_real-all-sito.bat`: cajón de cadencia "cada 5 min" — hoy solo llama a
+  `ext_dicom_queues.conf`, pero está pensado como "-all-" para sumar ahí cualquier otra medición
+  futura con esta misma cadencia (ver tabla de cajones arriba).
 - `ext_kpis_negocio-all-sito.bat`: agrupa `ext_ris_metrics.conf`, `ext_pacs_metrics.conf` y
   `ext_users_metrics.conf` en un solo `.bat` (tres `CALL` secuenciales, cada uno un proceso
   Logstash independiente) — mismo patrón que los `.bat` "-all-" existentes del hospital
@@ -163,9 +175,10 @@ hospital que estés configurando, pueden variar de un sitio a otro.
 1. Probar `ext_pacs_metrics.conf`, `ext_users_metrics.conf` y `ext_dicom_queues.conf` a mano,
    igual que se hizo con `ext_ris_metrics.conf` (`CALL logstash.bat -f <archivo>.conf`,
    confirmar el índice correspondiente en Elasticsearch).
-2. Crear las 2 Tareas Programadas (`ext_dicom_queues-sito.bat` cada 5 min,
-   `ext_kpis_negocio-all-sito.bat` cada 1 hora) — ver la sección de instalación más abajo para
-   el procedimiento de exportar/importar una tarea existente como base.
+2. Crear las Tareas Programadas de los cajones ya definidos (`ext_tiempo_real-all-sito.bat`
+   cada 5 min, `ext_kpis_negocio-all-sito.bat` cada 1 hora; `ext_al_reinicio-all-sito.bat`
+   queda para cuando se decida qué `.conf` va ahí) — ver la sección de instalación más abajo
+   para el procedimiento de exportar/importar una tarea existente como base.
 3. Dejar correr al menos un ciclo completo vía la Tarea Programada (no a mano) para confirmar
    que el `JAVA_HOME` limpio y las rutas funcionan igual cuando lo dispara el Programador de
    Tareas, no solo desde una consola interactiva.
@@ -254,11 +267,11 @@ variable `ES_TMPDIR` a una carpeta dedicada dentro de la propia instalación de 
    ```
    Confirmar en Kibana Dev Tools (`GET ext_ris_metrics_hourly/_search`) que aparecen documentos
    con la forma esperada (ver mapping abajo) antes de seguir. Repetir para los otros dos.
-3. **Crear dos Tareas Programadas** (no cuatro — ver "Arquitectura" arriba): una para
-   `ext_dicom_queues-sito.bat` (cada 5 min) y otra para `ext_kpis_negocio-all-sito.bat` (cada 1
-   hora, dispara los tres pipelines de KPIs en secuencia). Lo más seguro es exportar (`.xml`)
-   una tarea ya existente del hospital para ese `.bat` individual, importarla, y solo cambiarle
-   el nombre, la ruta del `.bat` y el desencadenador de repetición — así se hereda automáticamente
+3. **Crear una Tarea Programada por cajón de cadencia** (ver tabla en "Arquitectura" arriba):
+   `ext_tiempo_real-all-sito.bat` (cada 5 min), `ext_kpis_negocio-all-sito.bat` (cada 1 hora),
+   y `ext_al_reinicio-all-sito.bat` (al iniciar el equipo) cuando tenga algún `.conf` asignado.
+   Lo más seguro es exportar (`.xml`) una tarea ya existente del hospital, importarla, y solo
+   cambiarle el nombre, la ruta del `.bat` y el desencadenador — así se hereda automáticamente
    la configuración de usuario/privilegios/reintentos ya validada en ese sitio, sin adivinarla.
 4. Si vas a instalar `ext_dicom_queues` en un hospital que **nunca lo tuvo**, no hay nada que
    cuidar de romper — es alta nueva, no migración. Si en cambio ya existe un
