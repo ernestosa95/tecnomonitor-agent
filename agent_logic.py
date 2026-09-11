@@ -1771,8 +1771,8 @@ def ejecutar_ciclo_agente(config, log_callback=None):
 
     reporte = {
         "envelope": {
-            "schema_version": "4.3",
-            "agent_version":  "4.4.0",
+            "schema_version": "4.5",
+            "agent_version":  "4.5.0",
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },

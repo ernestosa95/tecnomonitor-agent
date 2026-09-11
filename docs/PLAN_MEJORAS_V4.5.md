@@ -198,7 +198,13 @@ Dos detectores del servidor asumen una cadencia de reporte que no necesariamente
 
 ---
 
-## 2. Preparación para autenticación obligatoria (`schema_version 4.5`)
+## 2. ✅ HECHO — Preparación para autenticación obligatoria (`schema_version 4.5`)
+
+**Estado:** `schema_version` ya se bumpeó a `"4.5"` en `agent_logic.py` (junto con `agent_version`
+y el `AppVersion` del instalador, ver [CHANGELOG.md](./CHANGELOG.md#v450)). El usuario confirmó
+que el servidor central ya tiene desplegada la validación de token para esta versión de schema.
+Sigue valiendo la pena releer los puntos 1-5 de abajo antes de distribuir el build a un hospital
+nuevo (en particular el punto 3: confirmar que ese hospital tiene un `auth_token` real cargado).
 
 El contrato (§2bis) es explícito: a partir de `schema_version: "4.5"`, el servidor va a exigir
 `Authorization: Bearer <token>` único por hospital, y va a rechazar (401) si falta, no existe,
@@ -339,11 +345,12 @@ conservador y reduce el riesgo de 503/timeouts intermitentes en RAID grandes.
 
 ## 6. Deuda técnica / higiene de versión
 
-- **Consolidar el versionado**: hoy conviven `AppVersion=4.4.1` (instalador),
-  `agent_version="4.4.0"` (envelope) y `schema_version="4.3"` (envelope), cada uno hardcodeado
-  en un lugar distinto (ver [BUILD.md](./BUILD.md#versionado)). Para v4.5, considerar una
-  única fuente de verdad (ej. un archivo `VERSION` leído tanto por `build.bat`/`.iss` como por
-  `agent_logic.py`) para evitar que se repita la situación de una versión reportando otra.
+- **✅ HECHO (parcial) — Consolidar el versionado**: `AppVersion` (instalador), `agent_version`
+  y `schema_version` ya están alineados en `4.5.0`/`4.5` (ver
+  [BUILD.md](./BUILD.md#versionado)). Sigue pendiente la parte de "una única fuente de verdad"
+  (ej. un archivo `VERSION` leído tanto por `build.bat`/`.iss` como por `agent_logic.py`) — hoy
+  se tocaron los tres lugares a mano para este bump, y hay que recordar hacerlo de nuevo en la
+  próxima versión si no se automatiza.
 - **Retirar o actualizar `Compiler.txt`**: contiene comandos de PyInstaller desactualizados
   (sin `--onedir`, con `--hidden-import=proxmoxer` que ya no aplica) que podrían inducir a
   compilar un build de servicio inestable si alguien los usa por error en vez de `build.bat`.
@@ -359,12 +366,12 @@ No es un compromiso de fechas, es un orden de dependencias e impacto:
 
 1. ✅ **Fixes de paridad con el contrato** (§1.1, §1.2) — hecho.
 2. ✅ **Validación local antes de adjuntar `application_metrics`** (§1.3) — hecho.
-3. **Coordinación con el equipo de servidor** sobre auth obligatoria (§2) y sobre los supuestos
-   de cadencia de Mirth/KPI (§1.5) — son bloqueantes de proceso, no de código, así que conviene
-   arrancarlos en paralelo a los puntos 1 y 2, no después.
-4. **Bump controlado a `schema_version: "4.5"`** — solo una vez confirmado por el equipo de
-   servidor que la validación de token está desplegada, con el flag de rollback listo (§2,
-   punto 5).
+3. **Coordinación con el equipo de servidor** sobre los supuestos de cadencia de Mirth/KPI
+   (§1.5) — sigue pendiente, no bloquea nada de lo ya hecho.
+4. ✅ **Bump a `schema_version: "4.5"`** — hecho, confirmado por el usuario que el servidor ya
+   tiene desplegada la validación de token. No se implementó el flag de rollback interno que
+   proponía el punto 5 de §2 (no se pidió) — si algo falla tras desplegar, la vía de reversión
+   es recompilar con `schema_version` vuelto a `"4.3"` en `agent_logic.py`.
 5. **Seguridad de la GUI local** (§3.1, §3.2) — no depende de nada del servidor. ✅ 3.2 hecho;
    3.1 (bypass de Eel) sigue pendiente.
 6. **Resto de robustez/performance/seguridad** (§3.3–§3.6, §4, §5) — según capacidad, no son

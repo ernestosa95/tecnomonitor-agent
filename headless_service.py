@@ -1,5 +1,5 @@
 """
-TecnoMonitor Agent — Servicio de Windows nativo (v4.4.1)
+TecnoMonitor Agent — Servicio de Windows nativo (v4.5.0)
 
 Cambios respecto de v4.3:
   - Deja de ser un `while True` lanzado por tarea programada ONLOGON.
@@ -22,6 +22,16 @@ Cambios de la 4.4.1 (post-validación en laboratorio):
     la versión vieja sigue tomado, hay dos agentes reportando al mismo
     servidor y pisándose el checkpoint. El servicio lo registra y aborta
     en vez de duplicar telemetría en silencio.
+
+Cambios de la 4.5.0:
+  - schema_version del envelope pasa a "4.5" (agent_logic.py): activa del
+    lado servidor la exigencia de header Authorization: Bearer <token>
+    validado contra hospital_id. El agente ya lo envía en cada ciclo sin
+    cambios de código — requiere que auth_token esté cargado y sea válido
+    en la configuración de cada hospital antes de desplegar este build.
+  - KPIs de RIS/PACS/usuarios pueden extraerse vía ElasticSearch en vez de
+    SQL Server directo (elastic.enabled_ris_metrics, coexiste con
+    enabled_sql) — ver docs/ELK_RIS_METRICS.md.
 
 Comandos (requiere privilegios de administrador):
     TecnoMonitorService.exe --startup auto install
@@ -339,7 +349,7 @@ class TecnoMonitorService(win32serviceutil.ServiceFramework):
     def SvcDoRun(self):
         self.ReportServiceStatus(win32service.SERVICE_RUNNING)
         log_evento_windows("Servicio iniciado.")
-        log("🚀 TecnoMonitor Service v4.4.1 — Iniciando (modo servicio de Windows)")
+        log("🚀 TecnoMonitor Service v4.5.0 — Iniciando (modo servicio de Windows)")
 
         # Migración: agente v4.3 sobreviviente
         if detectar_agente_legacy():

@@ -79,9 +79,24 @@ el propio `build.bat` en su verificación inicial.
 
 ## Versionado
 
-La versión "visible" (instalador, `AppVersion` en `TecnoMonitor.iss`) es `4.4.1`. El envelope
-que el agente envía al servidor central lleva un `agent_version` distinto (`"4.4.0"`,
-hardcodeado en `agent_logic.ejecutar_ciclo_agente`) y un `schema_version` fijo (`"4.3"`) — no
-hay un único lugar en el código que centralice el número de versión. Ver
-[CHANGELOG.md](./CHANGELOG.md) para el detalle de qué cambió en cada versión, reconstruido a
-partir de los comentarios dejados en el código.
+Desde v4.5.0, los tres números de versión están alineados: `AppVersion` en `TecnoMonitor.iss`,
+`agent_version` en el envelope (`agent_logic.ejecutar_ciclo_agente`) y `schema_version` son los
+tres `"4.5.0"`/`"4.5"`. Hasta v4.4.1 no era así (`AppVersion=4.4.1` convivía con
+`agent_version="4.4.0"` y `schema_version="4.3"`) — ver [CHANGELOG.md](./CHANGELOG.md) para el
+detalle de esa inconsistencia histórica.
+
+**`schema_version` no es un número de versión cosmético**: el servidor central lo usa para
+decidir cómo interpretar el payload y, desde `"4.5"`, para exigir el header
+`Authorization: Bearer <token>` validado contra `hospital_id` (ver
+[ENVELOPE_API.md](./ENVELOPE_API.md) y el contrato de ingesta del servidor). Antes de compilar
+un build con `schema_version` en `"4.5"`, confirmar que:
+
+1. El servidor central ya tiene desplegada esa validación de token (no asumirlo — el propio
+   contrato advierte que un agente en 4.5 contra un servidor que todavía no la implementó
+   corrompe el payload en silencio, ver [PLAN_MEJORAS_V4.5.md §2](./PLAN_MEJORAS_V4.5.md)).
+2. Cada hospital que reciba este build tiene un `auth_token` real cargado en su configuración
+   (no vacío ni de prueba) — sin esto, el servidor rechaza el reporte completo con 401.
+
+Sigue sin haber un único archivo que centralice el número de versión — al bumpear una versión
+nueva, tocar los tres lugares a mano (`TecnoMonitor.iss`, `agent_logic.py`, y las menciones en
+`build.bat`/`headless_service.py`).

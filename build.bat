@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
-TITLE TecnoMonitor - SRE Automated Build System (v4.4.1 Sentinel)
+TITLE TecnoMonitor - SRE Automated Build System (v4.5.0)
 COLOR 0B
 
 echo ===================================================================
-echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v4.4.1 Sentinel
+echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v4.5.0
 echo ===================================================================
 echo.
 
@@ -91,8 +91,8 @@ if errorlevel 1 goto ERROR_EXIT
 
 echo.
 echo ===================================================================
-echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v4.4.1 Sentinel)
-echo   Artefacto listo en: Output\TecnoMonitor_v4.4.1_Sentinel_Setup.exe
+echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v4.5.0)
+echo   Artefacto listo en: Output\TecnoMonitor_v4.5.0_Setup.exe
 echo ===================================================================
 pause
 exit /b 0
