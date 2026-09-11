@@ -707,15 +707,24 @@ def obtener_sensors_idrac(config):
         if r_th.status_code == 200:
             d = r_th.json()
             for t in d.get("Temperatures", []):
-                sensors["temperatures"].append({"name": t.get("Name"), "value": t.get("ReadingCelsius"), "unit": "C", "status": "OK"})
+                sensors["temperatures"].append({
+                    "name": t.get("Name"), "value": t.get("ReadingCelsius"), "unit": "C",
+                    "status": t.get("Status", {}).get("Health", "Unknown"),
+                })
             for f in d.get("Fans", []):
-                sensors["fans"].append({"name": f.get("FanName") or f.get("Name"), "value": f.get("Reading"), "unit": "RPM", "status": "OK"})
+                sensors["fans"].append({
+                    "name": f.get("FanName") or f.get("Name"), "value": f.get("Reading"), "unit": "RPM",
+                    "status": f.get("Status", {}).get("Health", "Unknown"),
+                })
         r_pw = requests.get(f"{base}/Power", auth=auth, verify=False, timeout=5)
         if r_pw.status_code == 200:
             d = r_pw.json()
             sensors["power"]["watts_current"] = safe_int(d.get("PowerControl", [{}])[0].get("PowerConsumedWatts"))
             for ps in d.get("PowerSupplies", []):
-                sensors["power"]["supplies"].append({"name": ps.get("Name"), "watts": safe_float(ps.get("LastPowerOutputWatts")), "status": "OK"})
+                sensors["power"]["supplies"].append({
+                    "name": ps.get("Name"), "watts": safe_float(ps.get("LastPowerOutputWatts")),
+                    "status": ps.get("Status", {}).get("Health", "Unknown"),
+                })
     except Exception as e:
         sensors["status"] = f"error: {str(e)}"
     return sensors
@@ -1452,7 +1461,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
                 reporte["physical_layer"] = {"host_info": {}, "telemetry": {}}
 
             reporte["physical_layer"]["sensors"] = obtener_sensors_idrac(idrac_cfg)
-            reporte["physical_layer"]["storage"] = obtener_storage_fisico_v3(idrac_cfg, log_callback)
+            reporte["physical_layer"]["storage_layer"] = obtener_storage_fisico_v3(idrac_cfg, log_callback)
             collection_meta["idrac"]["status"] = "ok"
         except Exception as e:
             collection_meta["idrac"]["status"] = "error"
