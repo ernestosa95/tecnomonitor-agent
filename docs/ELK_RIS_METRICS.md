@@ -5,9 +5,21 @@ Migra la extracción de KPIs de negocio (`ris`/`pacs`/`users`) del camino direct
 el autoenrute DICOM (`get_dicom_routing_queues`, ver [MODULOS.md](./MODULOS.md)). Basado en la
 guía técnica de colas DICOM que ya está en producción en el hospital.
 
-> Los archivos de referencia (`.conf`, `pipelines.yml.ejemplo`) viven en `/elk` en la raíz del
-> repo. **No se despliegan por el instalador del agente** — son para aplicar a mano en el
-> servidor de Logstash del hospital, como ya se hace con `ext_dicom_queues.conf`.
+> Los archivos de referencia (`.conf`, `.bat`) viven en `/elk` en la raíz del repo. **No se
+> despliegan por el instalador del agente** — son para aplicar a mano en el servidor de
+> Logstash de cada hospital.
+
+> **Corrección de campo (confirmada en el primer hospital piloto, ver
+> [CHANGELOG.md](./CHANGELOG.md)):** el diseño original de este documento asumía que la
+> instancia de Logstash del hospital corre como un proceso de larga duración con `pipelines.yml`
+> y `schedule =>` interno. La convención real observada — al menos en Extensa/Estensa, a juzgar
+> por los ~29 pipelines ya existentes en un hospital piloto (`ext_sm1report-sito-vw.conf` y
+> similares) — es distinta: **cada pipeline es un `.bat` propio que llama a Logstash con `CALL`,
+> sin `schedule =>` en el `.conf`, y una Tarea Programada de Windows dedicada por `.bat` es la
+> que dispara la periodicidad.** El `jdbc input` sin `schedule =>` corre la query una sola vez y
+> Logstash termina solo; el `.bat` sigue con un `timeout /t 30 /nobreak` después del `CALL`. Los
+> `.conf`/`.bat` de `/elk` ya reflejan este patrón — si tu Logstash sí corre como daemon
+> persistente con `pipelines.yml`, hay que volver a agregar `schedule =>` a cada `.conf`.
 
 ## Por qué no es un simple "gauge" como las colas DICOM
 
@@ -35,11 +47,16 @@ hace hoy SQL Server sobre el bloque completo, sin importar en cuántas horas se 
 ## Arquitectura
 
 ```
-SQL Server (ARHCORDSQLV)
+Tarea Programada de Windows (una por pipeline, cada 1 hora)
+   │  dispara el .bat correspondiente
+   ▼
+ext_ris_metrics-sito.bat / ext_pacs_metrics-sito.bat / ext_users_metrics-sito.bat
+   │  CALL logstash.bat -f <pipeline>.conf   (Logstash corre UNA VEZ y termina solo)
+   ▼
+SQL Server del hospital
    │  (mismas tablas/columnas que SQL_QUERY en agent_logic.py, ventana = última hora cerrada)
    ▼
-Logstash — 3 pipelines nuevos, sumados al pipelines.yml existente junto a ext_dicom_queues
-   │  upsert idempotente (document_id determinístico por hora+clave)
+Logstash — upsert idempotente (document_id determinístico por hora+clave)
    ▼
 ElasticSearch — 3 índices nuevos: ext_ris_metrics_hourly, ext_pacs_metrics_hourly,
                 ext_users_metrics_hourly
@@ -47,6 +64,9 @@ ElasticSearch — 3 índices nuevos: ext_ris_metrics_hourly, ext_pacs_metrics_ho
 agent_logic.extraer_metricas_ris_elastic()  ←  reemplaza a extraer_metricas_sql()
    (mismo checkpoint .sql_checkpoint, mismo application_metrics de salida)
 ```
+
+Cada uno de los 3 pipelines es completamente independiente (su propio `.conf`, su propio
+`.bat`, su propia Tarea Programada) — no dependen entre sí ni de `ext_dicom_queues`.
 
 ## Mapping de los índices nuevos
 
@@ -75,44 +95,58 @@ agent_logic.extraer_metricas_ris_elastic()  ←  reemplaza a extraer_metricas_sq
 | `inicios_sesion` | integer | `COUNT(a.GUID)` acotado a esa hora — **sí es aditivo**, se suma sin problema |
 | `user_guids` | array de string | `User_GUID` **distintos** logueados esa hora para ese rol — **no** un conteo (ver arriba) |
 
-## Los `.conf` (`/elk`)
+## Los `.conf` y `.bat` (`/elk`)
 
-- `ext_ris_metrics.conf` / `ext_pacs_metrics.conf`: `jdbc input` con `schedule => "5 * * * *"`
-  (a los 5 minutos de cada hora, para dar margen a que la hora anterior termine de cerrar del
-  todo), reusando la misma lógica `WITH(NOLOCK)`/`CASE`/`GROUP BY` de `SQL_QUERY`. El `output`
-  usa un `document_id` determinístico (`fingerprint` sobre equipo+aet+mod+hora o aet+mod+hora)
-  para que reprocesar la misma hora sea un upsert, no un duplicado.
+- `ext_ris_metrics.conf` / `ext_pacs_metrics.conf` / `ext_users_metrics.conf`: `jdbc input`
+  **sin `schedule =>`** (ver nota de arriba) — la ventana de 1 hora sale de `GETDATE()` en la
+  propia query, no de un cron de Logstash. Reusan la misma lógica `WITH(NOLOCK)`/`CASE`/
+  `GROUP BY` de `SQL_QUERY`. El `output` usa un `document_id` determinístico (`fingerprint`
+  sobre equipo+aet+mod+hora o aet+mod+hora) para que reprocesar la misma hora sea un upsert, no
+  un duplicado — importante porque acá no hay tracking incremental de Logstash sosteniendo el
+  estado entre corridas, cada invocación es un proceso nuevo.
 - `ext_users_metrics.conf`: además de lo anterior, arma `user_guids_csv` con `STRING_AGG` sobre
   un `SELECT DISTINCT` previo (evita duplicados dentro de la misma hora), y un filtro
   `mutate { split => ... }` lo convierte en array antes de indexar. **Requiere SQL Server
   2017+** por `STRING_AGG` — si el hospital tiene una versión más vieja, reemplazar esa
   sub-consulta por la variante clásica `FOR XML PATH('') + STUFF`.
-- `pipelines.yml.ejemplo`: referencia los tres `.conf` nuevos junto al `ext_dicom_queues.conf`
-  existente, para que un solo proceso de Logstash (un solo `.bat`, una sola tarea programada)
-  corra los cuatro pipelines.
+- `ext_dicom_queues-sito.bat`, `ext_ris_metrics-sito.bat`, `ext_pacs_metrics-sito.bat`,
+  `ext_users_metrics-sito.bat`: calco del patrón `CALL ...\logstash.bat -f ...conf` +
+  `timeout /t 30 /nobreak` ya usado por los demás pipelines del hospital. Cada uno necesita su
+  propia Tarea Programada (ver más abajo) — no hay un `.bat`/tarea compartido entre los tres.
 
-**Ninguno de los tres `.conf` fue probado contra un SQL Server real** (no hay uno accesible
-desde donde se escribió este código) — la lógica de agregación está copiada 1:1 de `SQL_QUERY`,
-pero conviene validar la sintaxis exacta (en particular `STRING_AGG` en `ext_users_metrics.conf`)
-antes de sumarlo a producción.
+Placeholders a completar antes de usar: `<PASSWORD>` (contraseña del usuario SQL, la misma que
+ya usan los demás `.conf` de ese servidor) y `<ELASTIC_HOST>` (IP del cluster Elastic, la misma
+que ya usan los demás `.conf`). El host SQL (`SRVDB-ESTENSA` en el hospital piloto) y el usuario
+(`sa`) están tomados de un `.conf` existente real — confirmar que coincidan con el servidor del
+hospital que estés configurando, pueden variar de un sitio a otro.
 
-## Migrar la instancia de Logstash existente
+**Ninguno de los tres `.conf` de KPIs fue probado de punta a punta contra un SQL Server real
+todavía** — la lógica de agregación está copiada 1:1 de `SQL_QUERY`, pero conviene validar la
+sintaxis exacta (en particular `STRING_AGG` en `ext_users_metrics.conf`) antes de confiar en
+los datos que produce.
 
-1. **Probar cada `.conf` nuevo de forma aislada primero**, sin tocar la instancia de producción:
+## Instalar los pipelines nuevos en un hospital
+
+1. **Copiar los `.conf` y `.bat`** de `/elk` a la carpeta de configuración de Logstash del
+   hospital (junto a los pipelines existentes, ej. `C:\Estensa\ELK\Configfile\`), completando
+   los placeholders de conexión.
+2. **Probar cada `.conf` de forma aislada primero**, antes de programar ninguna tarea:
    ```
    logstash.bat -f ext_ris_metrics.conf --config.test_and_exit
    logstash.bat -f ext_ris_metrics.conf --path.data C:\Estensa\ELK\L\data_test_ris
    ```
-   Confirmar en Kibana/Dev Tools que `ext_ris_metrics_hourly` recibe documentos con la forma
-   esperada antes de seguir.
-2. Copiar `pipelines.yml.ejemplo` a la carpeta de config de Logstash como `pipelines.yml`,
-   ajustando las rutas de `path.config` al layout real del servidor.
-3. Cambiar el `.bat` que hoy arranca con `-f ext_dicom_queues.conf` para que arranque **sin**
-   `-f` (Logstash carga `pipelines.yml` automáticamente si no se le pasa un archivo puntual).
-4. **Hacer este cambio en una ventana de mantenimiento**, no en caliente: es una migración del
-   mecanismo de arranque de un pipeline que ya está en producción (autoenrute DICOM). Confirmar
-   después de reiniciar que `ext_dicom_queues` sigue publicando normalmente antes de dar por
-   cerrada la migración.
+   Confirmar en Kibana Dev Tools (`GET ext_ris_metrics_hourly/_search`) que aparecen documentos
+   con la forma esperada (ver mapping abajo) antes de seguir. Repetir para los otros dos.
+3. **Crear una Tarea Programada por cada `.bat`** (cuatro en total si también se instala
+   `ext_dicom_queues`), disparada cada 1 hora, apuntando al `.bat` correspondiente — mismo
+   criterio que ya usan las tareas existentes de este hospital para los demás pipelines (mirar
+   una tarea ya existente en el Programador de Tareas para copiar su configuración exacta:
+   usuario, reintentos, etc.).
+4. Si vas a instalar `ext_dicom_queues` en un hospital que **nunca lo tuvo**, no hay nada que
+   cuidar de romper — es alta nueva, no migración. Si en cambio ya existe un
+   `ext_dicom_queues.conf` corriendo como proceso persistente con `schedule =>` interno (el
+   patrón que describe la guía original), no lo reemplaces por el `.bat` de acá sin evaluarlo
+   antes: cambiaría su mecanismo de ejecución.
 
 ## Configuración del agente
 

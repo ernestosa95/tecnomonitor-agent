@@ -41,7 +41,7 @@ service_control.py    Wrapper sobre el SCM de Windows (start/stop/status) usado 
 main_gui.py           Entry point de la GUI (Eel), expone funciones Python al frontend
 web/                  Frontend de la GUI (index.html, script.js, style.css)
 rules.json            Reglas de clasificación de errores para el módulo de logs Elastic
-elk/                  Referencia de pipelines de Logstash (.conf/pipelines.yml) para KPIs de RIS vía Elastic — no se empaqueta ni se instala, es para aplicar a mano en el servidor ELK del hospital
+elk/                  Referencia de pipelines de Logstash (.conf + .bat, un proceso por pipeline) para autoenrute DICOM y KPIs de RIS vía Elastic — no se empaqueta ni se instala, es para aplicar a mano en el servidor ELK de cada hospital
 debug_disk.py         Script suelto de diagnóstico manual de latencia de disco (no se empaqueta)
 TecnoMonitor.iss       Script de Inno Setup para el instalador
 build.bat              Pipeline de compilación (PyInstaller + Inno Setup)
