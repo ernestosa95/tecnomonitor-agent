@@ -133,8 +133,9 @@ hospital por hospital. `headless_service.py` decide con un `elif` (no ambos a la
 
 Ambos caminos comparten el mismo checkpoint (`.sql_checkpoint`) y producen el mismo
 `application_metrics` en el envelope — no hay diferencia visible para el servidor central según
-cuál esté activo. Por ahora no hay campos en la GUI para esto: se configura editando
-`monitor_config.json` a mano en el hospital piloto.
+cuál esté activo. La GUI expone este sub-ítem dentro de la tarjeta 8 (ElasticSearch), como
+"KPIs de RIS vía Elastic" — mismo patrón visual que el sub-ítem de autoenrute DICOM, con su
+propio botón de test (valida lectura sobre los tres índices en un solo llamado).
 
 ## Claves internas transitorias (no se guardan en disco)
 

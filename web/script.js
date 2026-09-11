@@ -32,13 +32,19 @@ function toggleCard(bodyId, checkbox) {
     el.style.opacity       = checkbox.checked ? '1'    : '0.5';
     el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
 
-    // El autoenrute DICOM ahora lee desde ElasticSearch: si se apaga esa
-    // tarjeta, el sub-ítem queda sin fuente de datos y se desactiva.
+    // El autoenrute DICOM y los KPIs de RIS vía Elastic leen desde
+    // ElasticSearch: si se apaga esa tarjeta, ambos sub-ítems quedan sin
+    // fuente de datos y se desactivan.
     if (bodyId === 'elastic_body' && !checkbox.checked) {
         const dicomRoutingSwitch = document.getElementById('enabled_dicom_routing');
         if (dicomRoutingSwitch) {
             dicomRoutingSwitch.checked = false;
             toggleDicomRouting(dicomRoutingSwitch);
+        }
+        const risMetricsSwitch = document.getElementById('enabled_ris_metrics');
+        if (risMetricsSwitch) {
+            risMetricsSwitch.checked = false;
+            toggleRisMetrics(risMetricsSwitch);
         }
     }
 }
@@ -46,6 +52,14 @@ function toggleCard(bodyId, checkbox) {
 // Habilita/deshabilita los campos propios del sub-ítem de autoenrute.
 function toggleDicomRouting(checkbox) {
     const el = document.getElementById('dicom_routing_fields');
+    if (!el) return;
+    el.style.opacity       = checkbox.checked ? '1'    : '0.5';
+    el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
+}
+
+// Habilita/deshabilita los campos propios del sub-ítem de KPIs de RIS vía Elastic.
+function toggleRisMetrics(checkbox) {
+    const el = document.getElementById('ris_metrics_fields');
     if (!el) return;
     el.style.opacity       = checkbox.checked ? '1'    : '0.5';
     el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
@@ -186,6 +200,13 @@ async function cargarConfiguracion() {
             document.getElementById('elastic_index_pattern').value = cfg.elastic.index_pattern || 'se-es-logging-*';
             document.getElementById('elastic_dicom_index').value   = cfg.elastic.dicom_index || 'ext_dicom_queues';
             document.getElementById('elastic_dicom_max_age').value = cfg.elastic.dicom_max_age_minutes || 15;
+
+            // --- NUEVO v4.5: KPIs de RIS vía Elastic ---
+            document.getElementById('elastic_ris_exec_day').value    = cfg.elastic.ris_executions_per_day || 3;
+            document.getElementById('elastic_ris_start_date').value  = cfg.elastic.ris_historical_start_date || '';
+            document.getElementById('elastic_ris_index_ris').value   = cfg.elastic.ris_index_ris   || 'ext_ris_metrics_hourly';
+            document.getElementById('elastic_ris_index_pacs').value  = cfg.elastic.ris_index_pacs  || 'ext_pacs_metrics_hourly';
+            document.getElementById('elastic_ris_index_users').value = cfg.elastic.ris_index_users || 'ext_users_metrics_hourly';
         }
         const chkElastic = document.getElementById('enable_elastic');
         chkElastic.checked = !!cfg.enabled_elastic;
@@ -201,10 +222,14 @@ async function cargarConfiguracion() {
         const chkDicom = document.getElementById('enabled_dicom_routing');
         chkDicom.checked = dicomRoutingActivo;
 
-        // toggleCard debe correr DESPUÉS de fijar el sub-switch: si la tarjeta
-        // Elastic está apagada, se encarga de bajarlo por coherencia.
+        const chkRisMetrics = document.getElementById('enabled_ris_metrics');
+        chkRisMetrics.checked = !!(cfg.elastic && cfg.elastic.enabled_ris_metrics);
+
+        // toggleCard debe correr DESPUÉS de fijar los sub-switches: si la
+        // tarjeta Elastic está apagada, se encarga de bajarlos por coherencia.
         toggleCard('elastic_body', chkElastic);
         toggleDicomRouting(chkDicom);
+        toggleRisMetrics(chkRisMetrics);
 
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
@@ -304,6 +329,14 @@ async function guardarConfiguracion() {
             enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
             dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
             dicom_max_age_minutes:  parseInt(document.getElementById('elastic_dicom_max_age').value) || 15,
+
+            // --- NUEVO v4.5: KPIs de RIS vía Elastic (alternativa a la tarjeta SQL) ---
+            enabled_ris_metrics:     document.getElementById('enabled_ris_metrics').checked,
+            ris_executions_per_day:  parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
+            ris_historical_start_date: document.getElementById('elastic_ris_start_date').value,
+            ris_index_ris:           document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
+            ris_index_pacs:          document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
+            ris_index_users:         document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
         }
     };
 
@@ -748,6 +781,9 @@ function _leerConfigElasticDesdeUI() {
         user:        document.getElementById('elastic_user').value.trim(),
         pass:        document.getElementById('elastic_pass').value,
         dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
+        ris_index_ris:   document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
+        ris_index_pacs:  document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
+        ris_index_users: document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
     };
 }
 
@@ -794,6 +830,32 @@ async function testDicomIndex() {
         const res = await eel.test_dicom_index_gui(data)();
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("Error de comunicación con Python: " + e);
+    }
+}
+
+// Igual motivo que testDicomIndex: un usuario válido para un índice puede no
+// tener permiso sobre otro. Prueba los tres índices de RIS/PACS/usuarios en
+// un solo llamado en vez de tener que probarlos uno por uno.
+async function testRisMetrics() {
+    const btn = window.event?.target?.closest('button');
+    let originalText = '<i class="fas fa-plug"></i> Test (los 3 índices)';
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+
+    const data = _leerConfigElasticDesdeUI();
+
+    if (!data.host) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+
+    try {
+        const res = await eel.test_ris_metrics_gui(data)();
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert(res.success ? `✅ Todo OK:\n${res.msg}` : `❌ Hay problemas:\n${res.msg}`);
     } catch (e) {
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert("Error de comunicación con Python: " + e);

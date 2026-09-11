@@ -314,6 +314,11 @@ def test_elastic_gui(data):
 def test_dicom_index_gui(data):
     return agent_logic.test_connection_dicom_index(data)
 
+# --- NUEVO v4.5: Test KPIs de RIS vía Elastic ---
+@eel.expose
+def test_ris_metrics_gui(data):
+    return agent_logic.test_connection_ris_metrics(data)
+
 
 # ---------------------------------------------------------------------------
 # ARRANQUE

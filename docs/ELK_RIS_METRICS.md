@@ -122,8 +122,10 @@ con `enabled_sql` (no lo reemplaza) — un hospital no migrado sigue usando SQL 
 ningún cambio; activar `enabled_ris_metrics` en un hospital puntual una vez que su Logstash ya
 esté publicando a los tres índices nuevos.
 
-Por ahora esta configuración **se edita a mano en `monitor_config.json`** (no hay campos en la
-GUI todavía — ver [PLAN_MEJORAS_V4.5.md](./PLAN_MEJORAS_V4.5.md) para el resto del roadmap).
+La GUI tiene un sub-ítem dedicado ("KPIs de RIS vía Elastic") dentro de la tarjeta 8
+(ElasticSearch), con su propio botón de test que valida lectura sobre los tres índices en un
+solo llamado (`test_connection_ris_metrics` en `agent_logic.py`) — mismo patrón que el sub-ítem
+de autoenrute DICOM.
 
 ## Prueba de no regresión antes de apagar el camino SQL directo en un hospital
 

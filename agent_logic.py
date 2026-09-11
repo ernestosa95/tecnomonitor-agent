@@ -754,6 +754,56 @@ def test_connection_dicom_index(data):
     return {"success": True,
             "msg": f"Índice '{index}' accesible. Antigüedad del último dato: {edad_txt}."}
 
+
+def test_connection_ris_metrics(data):
+    """
+    Test de la tarjeta "KPIs de RIS vía Elastic" (botón de la GUI).
+
+    Igual motivo que test_connection_dicom_index: un usuario válido para un
+    índice puede no tener permiso sobre otro, y ese 403 es difícil de
+    diagnosticar en producción. Prueba los tres índices (ris/pacs/users) en
+    un solo llamado.
+    """
+    host = (data.get("host") or "").strip()
+    if not host:
+        return {"success": False, "msg": "Host de ElasticSearch no configurado"}
+
+    port = data.get("port", 29200)
+    auth = HTTPBasicAuth(data.get("user", ""), data.get("pass", "")) if data.get("user") else None
+
+    indices = {
+        "RIS":      data.get("ris_index_ris")   or "ext_ris_metrics_hourly",
+        "PACS":     data.get("ris_index_pacs")  or "ext_pacs_metrics_hourly",
+        "Usuarios": data.get("ris_index_users") or "ext_users_metrics_hourly",
+    }
+
+    resultados = []
+    for etiqueta, index in indices.items():
+        url = f"http://{host}:{port}/{index}/_search"
+        try:
+            r = requests.post(url, json={"size": 1, "query": {"match_all": {}}}, auth=auth, timeout=8)
+        except Exception as e:
+            resultados.append(f"{etiqueta} ('{index}'): error de conexión — {e}")
+            continue
+
+        if r.status_code == 403:
+            resultados.append(f"{etiqueta} ('{index}'): sin permiso de lectura (HTTP 403)")
+        elif r.status_code == 404:
+            resultados.append(f"{etiqueta} ('{index}'): el índice no existe (HTTP 404) — ¿ya corrió el pipeline de Logstash?")
+        elif r.status_code != 200:
+            resultados.append(f"{etiqueta} ('{index}'): HTTP {r.status_code}")
+        else:
+            try:
+                hits = r.json().get("hits", {}).get("hits", [])
+            except Exception:
+                resultados.append(f"{etiqueta} ('{index}'): respuesta no interpretable de ElasticSearch")
+                continue
+            resultados.append(f"{etiqueta} ('{index}'): OK" + (" (todavía sin documentos)" if not hits else ""))
+
+    hubo_error = any(": OK" not in r for r in resultados)
+    return {"success": not hubo_error, "msg": "\n".join(resultados)}
+
+
 # ---------------------------------------------------------------------------
 # PROXMOX
 # ---------------------------------------------------------------------------

@@ -344,6 +344,11 @@
             </div>
             <div id="collapse_5" class="collapse">
                 <div class="card-body" id="sql_body" style="opacity: 0.5; pointer-events: none;">
+                    <small class="text-muted d-block mb-3">
+                        <i class="fas fa-circle-info me-1"></i>
+                        Si "KPIs de RIS vía Elastic" está activo en la tarjeta de ElasticSearch,
+                        esa configuración tiene prioridad y esta tarjeta se ignora.
+                    </small>
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="form-label text-muted small fw-bold">IP / Hostname (SQL)</label>
@@ -519,6 +524,59 @@
                                     <div class="col-md-2 d-flex align-items-start">
                                         <button class="btn btn-warning text-white w-100 mt-4" onclick="testDicomIndex()">
                                             <i class="fas fa-plug"></i> Test
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- FIN Sub-ítem -->
+
+                        <!-- Sub-ítem: KPIs de RIS vía Elastic (v4.5, alternativa a la tarjeta SQL) -->
+                        <div class="col-md-12 mt-3">
+                            <div class="p-3 border rounded bg-light">
+                                <div class="form-check form-switch d-flex align-items-center m-0">
+                                    <input class="form-check-input fs-4 mt-0 me-3" type="checkbox" id="enabled_ris_metrics"
+                                           onchange="toggleRisMetrics(this)">
+                                    <div>
+                                        <label class="form-check-label fw-bold text-primary mb-0" for="enabled_ris_metrics">
+                                            KPIs de RIS vía Elastic
+                                        </label>
+                                        <small class="text-muted d-block mt-1">
+                                            Reemplaza a la tarjeta "Métricas de Negocio (SQL)": suma buckets horarios que
+                                            un pipeline de Logstash publica a Elastic, en vez de conectar directo a SQL Server.
+                                            Requiere que ese pipeline ya esté corriendo en el hospital (ver docs/ELK_RIS_METRICS.md).
+                                        </small>
+                                    </div>
+                                </div>
+
+                                <div class="row g-3 mt-1" id="ris_metrics_fields" style="opacity: 0.5; pointer-events: none;">
+                                    <div class="col-md-3">
+                                        <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
+                                        <input type="number" class="form-control" id="elastic_ris_exec_day" value="3" min="1" max="24">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label text-muted small fw-bold">Fecha Inicio (Backfill)</label>
+                                        <input type="date" class="form-control" id="elastic_ris_start_date">
+                                        <small class="text-muted d-block mt-1">Dejar vacío para iniciar hoy.</small>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label text-muted small fw-bold">Índice RIS</label>
+                                        <input type="text" class="form-control" id="elastic_ris_index_ris"
+                                               placeholder="ext_ris_metrics_hourly" value="ext_ris_metrics_hourly">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label text-muted small fw-bold">Índice PACS</label>
+                                        <input type="text" class="form-control" id="elastic_ris_index_pacs"
+                                               placeholder="ext_pacs_metrics_hourly" value="ext_pacs_metrics_hourly">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label text-muted small fw-bold">Índice Usuarios</label>
+                                        <input type="text" class="form-control" id="elastic_ris_index_users"
+                                               placeholder="ext_users_metrics_hourly" value="ext_users_metrics_hourly">
+                                    </div>
+                                    <div class="col-md-12 d-flex justify-content-end">
+                                        <button class="btn btn-warning text-white" onclick="testRisMetrics()">
+                                            <i class="fas fa-plug"></i> Test (los 3 índices)
                                         </button>
                                     </div>
                                 </div>
