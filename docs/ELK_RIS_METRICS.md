@@ -109,10 +109,19 @@ Cada uno de los 3 pipelines es completamente independiente (su propio `.conf`, s
   `mutate { split => ... }` lo convierte en array antes de indexar. **Requiere SQL Server
   2017+** por `STRING_AGG` — si el hospital tiene una versión más vieja, reemplazar esa
   sub-consulta por la variante clásica `FOR XML PATH('') + STUFF`.
+- `ext_dicom_queues.conf`: el SELECT está confirmado contra una instalación real ya en
+  producción en otro hospital (mismas columnas que espera `agent_logic.get_dicom_routing_queues`:
+  `idrule`, `fromnode_key/nickname/hostname`, `tonode_key/nickname/hostname`,
+  `pending_instances`). Adaptado acá para seguir el mismo patrón sin `schedule =>` que los otros
+  tres, aunque la referencia original corría como proceso persistente con cron interno
+  (`*/5 * * * *`) — si tu Logstash sí es un daemon persistente, agregar de vuelta
+  `schedule => "*/5 * * * *"` al `.conf` y no usar el `.bat` de acá. Solo tiene un `output`
+  (índice de estado actual) — no incluye el índice histórico que menciona la guía original para
+  Kibana, ya que el agente no lo lee y no está en el alcance de este ciclo.
 - `ext_dicom_queues-sito.bat`, `ext_ris_metrics-sito.bat`, `ext_pacs_metrics-sito.bat`,
   `ext_users_metrics-sito.bat`: calco del patrón `CALL ...\logstash.bat -f ...conf` +
   `timeout /t 30 /nobreak` ya usado por los demás pipelines del hospital. Cada uno necesita su
-  propia Tarea Programada (ver más abajo) — no hay un `.bat`/tarea compartido entre los tres.
+  propia Tarea Programada (ver más abajo) — no hay un `.bat`/tarea compartido entre los cuatro.
 
 Placeholders a completar antes de usar: `<PASSWORD>` (contraseña del usuario SQL, la misma que
 ya usan los demás `.conf` de ese servidor) y `<ELASTIC_HOST>` (IP del cluster Elastic, la misma
@@ -120,10 +129,11 @@ que ya usan los demás `.conf`). El host SQL (`SRVDB-ESTENSA` en el hospital pil
 (`sa`) están tomados de un `.conf` existente real — confirmar que coincidan con el servidor del
 hospital que estés configurando, pueden variar de un sitio a otro.
 
-**Ninguno de los tres `.conf` de KPIs fue probado de punta a punta contra un SQL Server real
-todavía** — la lógica de agregación está copiada 1:1 de `SQL_QUERY`, pero conviene validar la
-sintaxis exacta (en particular `STRING_AGG` en `ext_users_metrics.conf`) antes de confiar en
-los datos que produce.
+**Los tres `.conf` de KPIs (ris/pacs/users) no fueron probados de punta a punta contra un SQL
+Server real todavía** — la lógica de agregación está copiada 1:1 de `SQL_QUERY`, pero conviene
+validar la sintaxis exacta (en particular `STRING_AGG` en `ext_users_metrics.conf`) antes de
+confiar en los datos que produce. `ext_dicom_queues.conf` sí está confirmado, salvo por la
+adaptación del punto de conexión y el cambio de `schedule =>` descriptos arriba.
 
 ## Instalar los pipelines nuevos en un hospital
 
@@ -137,11 +147,13 @@ los datos que produce.
    ```
    Confirmar en Kibana Dev Tools (`GET ext_ris_metrics_hourly/_search`) que aparecen documentos
    con la forma esperada (ver mapping abajo) antes de seguir. Repetir para los otros dos.
-3. **Crear una Tarea Programada por cada `.bat`** (cuatro en total si también se instala
-   `ext_dicom_queues`), disparada cada 1 hora, apuntando al `.bat` correspondiente — mismo
+3. **Crear una Tarea Programada por cada `.bat`**, apuntando al `.bat` correspondiente — mismo
    criterio que ya usan las tareas existentes de este hospital para los demás pipelines (mirar
    una tarea ya existente en el Programador de Tareas para copiar su configuración exacta:
-   usuario, reintentos, etc.).
+   usuario, reintentos, etc.). Cadencia: **cada 1 hora** para `ext_ris_metrics`/
+   `ext_pacs_metrics`/`ext_users_metrics` (coincide con la ventana horaria que calcula la
+   propia query); **cada 5 minutos** para `ext_dicom_queues` (misma cadencia que tenía su
+   `schedule =>` original).
 4. Si vas a instalar `ext_dicom_queues` en un hospital que **nunca lo tuvo**, no hay nada que
    cuidar de romper — es alta nueva, no migración. Si en cambio ya existe un
    `ext_dicom_queues.conf` corriendo como proceso persistente con `schedule =>` interno (el
