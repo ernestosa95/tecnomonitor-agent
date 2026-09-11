@@ -144,15 +144,34 @@ que ya usan los demás `.conf`). El host SQL (`SRVDB-ESTENSA` en el hospital pil
 (`sa`) están tomados de un `.conf` existente real — confirmar que coincidan con el servidor del
 hospital que estés configurando, pueden variar de un sitio a otro.
 
-**Estado de validación (hospital piloto, `2026-09-11`):** `ext_ris_metrics.conf` corrió contra
-`SRVDB-ESTENSA` real sin errores de conexión ni de sintaxis SQL — el JDBC input ejecutó la
-query completa (ver troubleshooting arriba para el camino recorrido hasta llegar a esto: JVM +
-Elasticsearch). Falta confirmar en Kibana Dev Tools que el documento resultante en
-`ext_ris_metrics_hourly` tiene la forma exacta esperada (ver mapping arriba), y repetir la
-misma prueba para `ext_pacs_metrics.conf` y `ext_users_metrics.conf` — este último es el que
-más conviene revisar de cerca por el `STRING_AGG`. `ext_dicom_queues.conf` está confirmado en
-su SQL (viene de una instalación real ya en producción en otro hospital), pendiente la misma
-prueba de punta a punta en este sitio.
+**Estado de validación (hospital piloto, `2026-09-11`):**
+
+- ✅ `ext_ris_metrics.conf` — confirmado de punta a punta: conectó a `SRVDB-ESTENSA`, ejecutó la
+  query completa sin errores, conectó a Elasticsearch, indexó y el documento resultante en
+  `ext_ris_metrics_hourly` se verificó con la forma esperada (ver mapping arriba). Corrido a
+  mano con `CALL logstash.bat -f ext_ris_metrics.conf` — todavía no vía el `.bat`/Tarea
+  Programada real.
+- ⏳ `ext_pacs_metrics.conf` / `ext_users_metrics.conf` — mismo diseño y mismo entorno ya
+  validado con `ext_ris_metrics.conf`, pero **no probados individualmente todavía**. Repetir la
+  misma prueba manual antes de confiar en ellos — `ext_users_metrics.conf` es el que más
+  conviene revisar de cerca por el `STRING_AGG`.
+- ⏳ `ext_dicom_queues.conf` — SQL confirmado en otra instalación real (otro hospital), pero
+  **sin probar todavía en este sitio**.
+
+### Pendiente para retomar (no bloqueante, quedó frenado acá por el fin de semana)
+
+1. Probar `ext_pacs_metrics.conf`, `ext_users_metrics.conf` y `ext_dicom_queues.conf` a mano,
+   igual que se hizo con `ext_ris_metrics.conf` (`CALL logstash.bat -f <archivo>.conf`,
+   confirmar el índice correspondiente en Elasticsearch).
+2. Crear las 2 Tareas Programadas (`ext_dicom_queues-sito.bat` cada 5 min,
+   `ext_kpis_negocio-all-sito.bat` cada 1 hora) — ver la sección de instalación más abajo para
+   el procedimiento de exportar/importar una tarea existente como base.
+3. Dejar correr al menos un ciclo completo vía la Tarea Programada (no a mano) para confirmar
+   que el `JAVA_HOME` limpio y las rutas funcionan igual cuando lo dispara el Programador de
+   Tareas, no solo desde una consola interactiva.
+4. Recién ahí, activar `enabled_ris_metrics` (y `enabled_dicom_routing` si corresponde) en la
+   GUI del agente para este hospital y confirmar en `activity.log` que el ciclo del agente
+   levanta los datos correctamente (buscar `⚙️ RIS/Elastic: Extrayendo bloque regular`).
 
 ## Troubleshooting — problemas reales encontrados en el hospital piloto
 
