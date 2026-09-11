@@ -188,6 +188,72 @@ def reset_checkpoint():
                 pass
 
 # ---------------------------------------------------------------------------
+# VALIDACIÓN DEFENSIVA DE application_metrics
+#
+# El servidor central valida esto con un schema estricto: un solo campo mal
+# formado tira abajo el reporte completo (incluida la telemetría de
+# infraestructura que viaja en el mismo POST), y el error que devuelve es
+# genérico (no dice qué campo falló). Antes de adjuntar el bloque al envelope,
+# lo chequeamos acá para poder loguear el detalle real y, si no pasa, omitirlo
+# este ciclo en vez de dejar que el servidor rechace todo a ciegas.
+# ---------------------------------------------------------------------------
+_RIS_CAMPOS_STR = ("equipo", "aet", "mod")
+_RIS_CAMPOS_NUM = ("totales", "citados", "admitidos", "ejecutados", "con_imagen",
+                   "borradores", "definitivos", "suspendidos")
+_PACS_CAMPOS_STR = ("aet", "mod")
+_PACS_CAMPOS_NUM = ("almacenados",)
+_USERS_CAMPOS_STR = ("rol",)
+_USERS_CAMPOS_NUM = ("usuarios_unicos", "inicios_sesion")
+
+
+def _normalizar_listas_application_metrics(app_metrics: dict):
+    """
+    Si una sub-consulta de SQL_QUERY no matchea ninguna fila, SQL Server
+    devuelve NULL para esa columna JSON (no "[]"). Tras el json.loads() eso
+    llega como None, y un servidor que espera una lista (no Optional) rechaza
+    el reporte entero por esto. None == "no hubo filas" == lista vacía.
+    """
+    for clave in ("ris", "pacs", "users"):
+        if app_metrics.get(clave) is None:
+            app_metrics[clave] = []
+
+
+def _validar_item(item, campos_str, campos_num, indice, nombre_lista):
+    if not isinstance(item, dict):
+        return f"{nombre_lista}[{indice}] no es un objeto (llegó {type(item).__name__})"
+    for campo in campos_str:
+        if not isinstance(item.get(campo), str):
+            return f"{nombre_lista}[{indice}].{campo} debería ser texto y llegó {item.get(campo)!r}"
+    for campo in campos_num:
+        valor = item.get(campo)
+        if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+            return f"{nombre_lista}[{indice}].{campo} debería ser numérico y llegó {valor!r}"
+    return None
+
+
+def _validar_application_metrics(app_metrics: dict):
+    """
+    Chequeo estructural mínimo (sin coaccionar ni completar valores) contra
+    los campos que el contrato de ingesta exige para cada ítem de ris/pacs/users.
+    Devuelve None si está todo bien, o una descripción puntual del primer
+    problema encontrado (para loguearlo — el 500 del servidor no lo dice).
+    """
+    listas = {
+        "ris":   (app_metrics.get("ris", []),   _RIS_CAMPOS_STR,   _RIS_CAMPOS_NUM),
+        "pacs":  (app_metrics.get("pacs", []),  _PACS_CAMPOS_STR,  _PACS_CAMPOS_NUM),
+        "users": (app_metrics.get("users", []), _USERS_CAMPOS_STR, _USERS_CAMPOS_NUM),
+    }
+    for nombre_lista, (items, campos_str, campos_num) in listas.items():
+        if not isinstance(items, list):
+            return f"{nombre_lista} debería ser una lista y llegó {type(items).__name__}"
+        for i, item in enumerate(items):
+            problema = _validar_item(item, campos_str, campos_num, i, nombre_lista)
+            if problema:
+                return problema
+    return None
+
+
+# ---------------------------------------------------------------------------
 # MÉTRICAS SQL (NIVEL NEGOCIO - EJECUCIÓN LENTA)
 # ---------------------------------------------------------------------------
 def extraer_metricas_sql(sql_config, log_func=None):
@@ -259,9 +325,20 @@ def extraer_metricas_sql(sql_config, log_func=None):
         if "application_metrics" not in data_json:
             data_json["application_metrics"] = {}
 
+        _normalizar_listas_application_metrics(data_json["application_metrics"])
+
         data_json["application_metrics"]["extraction_interval_hours"] = interval_hours
         data_json["application_metrics"]["start_time_extraction"]     = start_date_sql
         data_json["application_metrics"]["end_time_extraction"]       = end_date_sql
+
+        problema = _validar_application_metrics(data_json["application_metrics"])
+        if problema:
+            if log_func:
+                log_func(
+                    f"❌ application_metrics inválido, se omite este bloque "
+                    f"[{start_date_sql} → {end_date_sql}]: {problema}. Se reintentará en el próximo ciclo."
+                )
+            return None
 
         # IMPORTANTE: el checkpoint se guarda solo cuando el POST confirme éxito.
         data_json["_checkpoint_to_save"] = target_end_time
