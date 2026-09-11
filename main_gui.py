@@ -10,7 +10,7 @@ if sys.stderr is None:
 
 import eel
 import json
-import hashlib
+import time
 import security
 import agent_logic
 import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
@@ -20,11 +20,21 @@ CONFIG_FILE = os.path.join(DATA_DIR, "monitor_config.json")
 LOG_FILE    = os.path.join(DATA_DIR, "activity.log")
 
 # ---------------------------------------------------------------------------
-# Hash de la contraseña de acceso a la GUI.
-# Para cambiarla: python -c "import hashlib; print(hashlib.sha256(b'NuevaClave').hexdigest())"
-# Clave actual: TM4dm1n
+# Código de acceso a la GUI — v4.5: código único por instalación (ver
+# security.py), ya no un hash fijo compartido entre todos los hospitales.
+# Se resuelve una sola vez al arrancar el proceso; si es la primera vez (o el
+# admin.hash fue borrado a propósito para resetear el acceso), _CODIGO_NUEVO
+# guarda el texto plano para que la GUI se lo muestre una única vez.
 # ---------------------------------------------------------------------------
-_ADMIN_HASH = hashlib.sha256(b"TM4dm1n").hexdigest()
+_ADMIN_HASH, _CODIGO_NUEVO = security.obtener_o_generar_hash_admin()
+
+# Lockout de intentos fallidos — vive en Python (no solo en el frontend, que
+# es trivialmente saltable llamando la función expuesta directo). Simple:
+# tras 5 fallos consecutivos, bloquea 60s; se resetea al acertar o al vencer.
+_INTENTOS_FALLIDOS = 0
+_BLOQUEADO_HASTA   = 0.0
+_MAX_INTENTOS      = 5
+_LOCKOUT_SEGUNDOS  = 60
 
 
 def resource_path(relative_path):
@@ -39,9 +49,34 @@ eel.init(resource_path('web'))
 # AUTENTICACIÓN
 # ---------------------------------------------------------------------------
 @eel.expose
-def verificar_clave(clave_ingresada: str) -> bool:
-    """El frontend envía la clave; Python compara el hash. Nunca viaja la clave real."""
-    return hashlib.sha256(clave_ingresada.encode()).hexdigest() == _ADMIN_HASH
+def estado_acceso_gui():
+    """
+    El frontend la llama al cargar la página, antes de que el admin escriba
+    nada. Si _CODIGO_NUEVO está poblado, es la única vez que se muestra.
+    """
+    return {"primera_vez": _CODIGO_NUEVO is not None, "codigo": _CODIGO_NUEVO}
+
+
+@eel.expose
+def verificar_clave(clave_ingresada: str) -> dict:
+    """El frontend envía el código; Python compara el hash. Nunca viaja el código guardado."""
+    global _INTENTOS_FALLIDOS, _BLOQUEADO_HASTA
+
+    ahora = time.time()
+    if ahora < _BLOQUEADO_HASTA:
+        return {"ok": False, "bloqueado": True, "segundos_restantes": int(_BLOQUEADO_HASTA - ahora) + 1}
+
+    if security.verificar_codigo_acceso(clave_ingresada, _ADMIN_HASH):
+        _INTENTOS_FALLIDOS = 0
+        return {"ok": True, "bloqueado": False, "segundos_restantes": 0}
+
+    _INTENTOS_FALLIDOS += 1
+    if _INTENTOS_FALLIDOS >= _MAX_INTENTOS:
+        _BLOQUEADO_HASTA   = ahora + _LOCKOUT_SEGUNDOS
+        _INTENTOS_FALLIDOS = 0
+        return {"ok": False, "bloqueado": True, "segundos_restantes": _LOCKOUT_SEGUNDOS}
+
+    return {"ok": False, "bloqueado": False, "segundos_restantes": 0}
 
 
 # ---------------------------------------------------------------------------
