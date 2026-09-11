@@ -401,3 +401,35 @@ No es un compromiso de fechas, es un orden de dependencias e impacto:
       necesitarlo en producción.
 - [ ] Revisar que ningún hospital tenga `auth_token` vacío o de prueba antes de activar la
       exigencia de token del lado servidor.
+
+## 9. Más allá de v4.5 — anotado para diseñar más adelante (no bloquea nada de lo actual)
+
+### 9.1 Un agente, múltiples sistemas monitoreados en la misma red
+
+Hoy la arquitectura asume "un agente = una instalación": el `monitor_config.json` de un
+hospital apunta a un único SQL Server/hipervisor/iDRAC como la instalación principal, aunque ya
+existe un patrón de **múltiples objetivos remotos** para VMs/workstations (`vms[]`, recolectado
+vía WMI sin necesitar un agente instalado en cada máquina — ver
+[MODULOS.md](./MODULOS.md#wmi--vms-workstations-y-equipos-médicos-windows)).
+
+Surgió la necesidad de extender esa misma idea a otros sistemas que conviven en la red del
+hospital pero no son "la instalación principal" — el caso concreto mencionado es una **cache
+DICOM** (un router/cache de imágenes separado del PACS principal). La idea es que un único
+agente instalado reporte también sobre estos sistemas adicionales, sin necesitar una instalación
+del agente por sistema.
+
+Preguntas a resolver cuando se diseñe esto (todavía sin responder, no decidir nada acá todavía):
+
+- ¿Qué tecnología expone la cache DICOM sus métricas — SQL Server propio (mismo patrón que
+  `vms[]`/WMI para IPs remotas), una API HTTP, SNMP, o algo específico del fabricante? Puede
+  variar de un sistema a otro, a diferencia de WMI que es uniforme para todo Windows.
+- ¿Encaja como una lista más al estilo `vms[]` (un array de "objetivos adicionales" con su
+  propio tipo/protocolo), o necesita su propia sección de configuración dedicada en la GUI?
+- ¿El envelope necesita una clave nueva para esto, o se puede modelar reusando alguna ya
+  existente (ej. otro objeto dentro de `virtual_layer` o `software_monitoring`) sin romper el
+  contrato con el servidor?
+- ¿Cuántos sistemas de este tipo puede tener un mismo hospital en la práctica? — define si vale
+  la pena optimizar para "uno o dos más" o si hay que pensar en una lista abierta desde el
+  principio.
+
+No es un ítem de la lista de v4.5 — queda anotado acá como el próximo tema de diseño a retomar.
