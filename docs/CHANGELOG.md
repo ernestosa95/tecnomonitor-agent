@@ -52,6 +52,16 @@ como está.
   hospital por hospital. Incluye soporte completo en la GUI (sub-ítem dentro de la tarjeta de
   ElasticSearch) y los `.conf` de Logstash de referencia en `elk/`. Ver
   [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md).
+- **Primer despliegue piloto de los pipelines de Logstash** (`2026-09-11`): confirmó dos
+  problemas de infraestructura preexistentes en el servidor del hospital, sin relación con
+  nuestros `.conf` — un `JAVA_HOME` externo (JDK 19) incompatible con la versión de
+  Logstash/JRuby instalada, y el servicio de Elasticsearch fallando por una carpeta temporal
+  inaccesible del lado del sistema operativo. Documentado en
+  [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md#troubleshooting--problemas-reales-encontrados-en-el-hospital-piloto)
+  para que el próximo hospital no tenga que redescubrirlos. De paso se ajustaron los `.conf`
+  (sin `schedule =>` interno, siguiendo la convención real de ese sitio) y se agrupó
+  `ext_ris_metrics`/`ext_pacs_metrics`/`ext_users_metrics` en un solo `.bat`/Tarea Programada
+  en vez de tres.
 
 Detalle completo de todo lo anterior en [PLAN_MEJORAS_V4.5.md](./PLAN_MEJORAS_V4.5.md).
 

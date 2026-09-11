@@ -144,11 +144,84 @@ que ya usan los demás `.conf`). El host SQL (`SRVDB-ESTENSA` en el hospital pil
 (`sa`) están tomados de un `.conf` existente real — confirmar que coincidan con el servidor del
 hospital que estés configurando, pueden variar de un sitio a otro.
 
-**Los tres `.conf` de KPIs (ris/pacs/users) no fueron probados de punta a punta contra un SQL
-Server real todavía** — la lógica de agregación está copiada 1:1 de `SQL_QUERY`, pero conviene
-validar la sintaxis exacta (en particular `STRING_AGG` en `ext_users_metrics.conf`) antes de
-confiar en los datos que produce. `ext_dicom_queues.conf` sí está confirmado, salvo por la
-adaptación del punto de conexión y el cambio de `schedule =>` descriptos arriba.
+**Estado de validación (hospital piloto, `2026-09-11`):** `ext_ris_metrics.conf` corrió contra
+`SRVDB-ESTENSA` real sin errores de conexión ni de sintaxis SQL — el JDBC input ejecutó la
+query completa (ver troubleshooting arriba para el camino recorrido hasta llegar a esto: JVM +
+Elasticsearch). Falta confirmar en Kibana Dev Tools que el documento resultante en
+`ext_ris_metrics_hourly` tiene la forma exacta esperada (ver mapping arriba), y repetir la
+misma prueba para `ext_pacs_metrics.conf` y `ext_users_metrics.conf` — este último es el que
+más conviene revisar de cerca por el `STRING_AGG`. `ext_dicom_queues.conf` está confirmado en
+su SQL (viene de una instalación real ya en producción en otro hospital), pendiente la misma
+prueba de punta a punta en este sitio.
+
+## Troubleshooting — problemas reales encontrados en el hospital piloto
+
+Esta sección documenta, en el orden en que aparecieron, los problemas reales que aparecieron al
+poner esto en marcha por primera vez — **ninguno de los dos terminó siendo un bug de nuestros
+`.conf`**, los dos eran problemas preexistentes del servidor. Quedan acá para que el próximo
+hospital no tenga que redescubrirlos desde cero.
+
+**Orden de diagnóstico recomendado, de atrás para adelante:** la próxima vez, antes de tocar
+ningún `.conf`, conviene primero confirmar que Elasticsearch responde
+(`http://<host>:<puerto>` en un navegador) y recién después probar Logstash — así se evita
+diagnosticar Logstash por un rato largo cuando el problema de fondo está en el otro extremo,
+como pasó acá.
+
+### 1. `JAVA_HOME` externo rompe Logstash
+
+Si el servidor tiene una JDK moderna (ej. 19) instalada y seteada como `JAVA_HOME` a nivel
+sistema (para otra aplicación, sin relación con Logstash), **todos** los pipelines de Logstash
+fallan al arrancar la JVM — no solo los nuevos, los ~29 ya existentes también, porque el
+problema está antes de que Logstash llegue a leer ningún `.conf`. Dos síntomas en cadena, según
+qué tan lejos llegue el arranque:
+
+1. `Unrecognized VM option 'UseConcMarkSweepGC'` — el `config/jvm.options` de Logstash trae
+   flags del recolector de basura CMS, eliminado de Java desde la versión 14. Fix: comentar
+   (`#`) las tres líneas de `## GC configuration` en `jvm.options` (`-XX:+UseConcMarkSweepGC`,
+   `-XX:CMSInitiatingOccupancyFraction=75`, `-XX:+UseCMSInitiatingOccupancyOnly`) y dejar que la
+   JVM use su recolector por defecto (G1GC en JDK moderno).
+2. Con eso resuelto, puede aparecer `InaccessibleObjectException` (ej. sobre
+   `java.security.MessageDigest`) — JRuby (que usa Logstash por dentro) necesita acceso
+   reflectivo a módulos internos del JDK que las versiones modernas restringen por defecto.
+   Parchear esto agregando `--add-opens` de a uno por error que aparezca es un pozo sin fondo.
+
+**La solución de raíz para ambos** es no usar esa JDK externa: Logstash trae su propia JDK
+empaquetada, compatible con la versión de JRuby que usa internamente. Los `.bat` de `/elk` ya
+incluyen `set JAVA_HOME=` antes de invocar Logstash, precisamente para esto — no toca la
+variable a nivel sistema (por si algo más en el servidor sí depende de esa JDK), solo la limpia
+para la invocación puntual de Logstash. Si los ~29 pipelines existentes del hospital no tienen
+esta línea en sus `.bat`, probablemente estén fallando en silencio también — vale la pena
+avisarle a quien administra ese servidor.
+
+**Ojo con la sesión de consola al probar a mano:** `set JAVA_HOME=` solo vale para la ventana de
+cmd donde se escribe — una consola nueva vuelve a heredar el `JAVA_HOME` del sistema. Para
+probar el fix real, ejecutar el `.bat` de `/elk` (que ya lo limpia por su cuenta) en vez de
+llamar a `logstash.bat` directo con `set JAVA_HOME=` tipeado a mano en cada sesión nueva.
+
+### 2. Elasticsearch no arranca — Error 1067, carpeta temporal inaccesible
+
+Un problema completamente distinto y sin relación con Logstash/Java: el servicio de Windows
+"Elasticsearch 7.10.2" fallaba con **Error 1067: El proceso terminó inesperadamente** — mensaje
+genérico que Windows da cuando el proceso se cae solo, sin indicar la causa real.
+
+La causa real vive en un log que **no** es el principal de Elasticsearch, sino el de stderr del
+wrapper del servicio (Commons Daemon/procrun):
+```
+<carpeta de instalación de Elasticsearch>\logs\elasticsearch-service-x64-stderr.<fecha>.log
+```
+Ahí apareció:
+```
+ERROR: Temporary file directory [C:\Users\<cuenta de servicio>\AppData\Local\Temp\elasticsearch] does not exist or is not accessible
+```
+El servicio corre bajo una cuenta de usuario cuya carpeta temporal (`AppData\Local\Temp\elasticsearch`)
+no existía. **Fix aplicado:** crear esa carpeta a mano (`AppData\Local\Temp\elasticsearch`, y
+`Temp` también si no existía) bajo el perfil de esa cuenta, y reiniciar el servicio.
+
+**Nota para el futuro (no aplicada todavía, evaluar si vuelve a pasar):** depender de la carpeta
+`Temp` de un perfil de usuario puntual es frágil — una limpieza de temporales, una política de
+grupo, o un reseteo de perfil pueden volver a borrarla. La alternativa más robusta es fijar la
+variable `ES_TMPDIR` a una carpeta dedicada dentro de la propia instalación de Elasticsearch
+(ej. `<ES_HOME>\temp`), en vez de depender del `AppData` de una cuenta de servicio.
 
 ## Instalar los pipelines nuevos en un hospital
 
