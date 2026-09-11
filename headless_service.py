@@ -384,8 +384,19 @@ class TecnoMonitorService(win32serviceutil.ServiceFramework):
                         break
                     continue
 
-                # --- Módulo SQL ---
-                if cfg.get("enabled_sql") and cfg.get("sql"):
+                # --- Módulo SQL (KPIs de negocio): vía Elastic si el hospital ya
+                # migró su Logstash (ver elk/), si no vía SQL Server directo. ---
+                elastic_cfg = cfg.get("elastic") or {}
+                if elastic_cfg.get("enabled_ris_metrics") and elastic_cfg.get("host"):
+                    try:
+                        sql_data = agent_logic.extraer_metricas_ris_elastic(elastic_cfg, log_func=log)
+                        if sql_data:
+                            cfg["_sql_data_payload"] = sql_data
+                        else:
+                            log("ℹ️ RIS/Elastic: bloque futuro o sin datos nuevos, se omite en este ciclo.")
+                    except Exception as e:
+                        log(f"❌ Error en módulo RIS/Elastic: {e}")
+                elif cfg.get("enabled_sql") and cfg.get("sql"):
                     try:
                         sql_data = agent_logic.extraer_metricas_sql(cfg["sql"], log_func=log)
                         if sql_data:

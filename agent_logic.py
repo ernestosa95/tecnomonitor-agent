@@ -218,7 +218,7 @@ def _normalizar_listas_application_metrics(app_metrics: dict):
             app_metrics[clave] = []
 
 
-def _validar_item(item, campos_str, campos_num, indice, nombre_lista):
+def _validar_item(item, campos_str, campos_num, indice, nombre_lista, campos_lista=()):
     if not isinstance(item, dict):
         return f"{nombre_lista}[{indice}] no es un objeto (llegó {type(item).__name__})"
     for campo in campos_str:
@@ -228,6 +228,24 @@ def _validar_item(item, campos_str, campos_num, indice, nombre_lista):
         valor = item.get(campo)
         if not isinstance(valor, (int, float)) or isinstance(valor, bool):
             return f"{nombre_lista}[{indice}].{campo} debería ser numérico y llegó {valor!r}"
+    for campo in campos_lista:
+        if not isinstance(item.get(campo), list):
+            return f"{nombre_lista}[{indice}].{campo} debería ser una lista y llegó {item.get(campo)!r}"
+    return None
+
+
+def _validar_documentos_horarios(docs, nombre_indice, campos_str, campos_num, campos_lista=()):
+    """
+    Valida los documentos CRUDOS que devuelve un índice horario de Elastic,
+    ANTES de agregarlos. Necesario porque _sumar_horas_* usa safe_int(), que
+    convierte un campo faltante/None en 0 silenciosamente — sin este chequeo
+    previo, un bucket de Logstash mal formado (ej. un campo que no se mapeó)
+    se leería como "0 esta hora" en vez de detectarse como dato inválido.
+    """
+    for i, doc in enumerate(docs):
+        problema = _validar_item(doc, campos_str, campos_num, i, nombre_indice, campos_lista=campos_lista)
+        if problema:
+            return problema
     return None
 
 
@@ -254,6 +272,46 @@ def _validar_application_metrics(app_metrics: dict):
 
 
 # ---------------------------------------------------------------------------
+# VENTANA DE EXTRACCIÓN (checkpoint + backfill) — compartida entre el camino
+# SQL directo (extraer_metricas_sql) y el camino vía Elasticsearch
+# (extraer_metricas_ris_elastic). El concepto de "qué bloque de tiempo toca
+# extraer ahora" es el mismo sin importar de dónde salgan después los
+# números — separarlo evita mantener esta lógica duplicada en dos lugares.
+# ---------------------------------------------------------------------------
+def _calcular_ventana_extraccion(executions_per_day_raw, historical_start_date, log_func=None):
+    """
+    Devuelve (target_start_time, target_end_time, interval_hours), o None si
+    el bloque todavía no terminó (hay que esperar al próximo ciclo).
+    """
+    executions_per_day = int(executions_per_day_raw)
+    if executions_per_day <= 0:
+        executions_per_day = 3
+    interval_hours = 24.0 / executions_per_day
+
+    ahora             = datetime.now()
+    ultimo_checkpoint = get_last_checkpoint()
+
+    if not ultimo_checkpoint:
+        if historical_start_date:
+            try:
+                target_start_time = datetime.strptime(historical_start_date, "%Y-%m-%d")
+                if log_func:
+                    log_func(f"🕰️ INICIANDO BACKFILL HISTÓRICO desde {historical_start_date}")
+            except Exception:
+                target_start_time = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            target_start_time = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        target_start_time = ultimo_checkpoint
+
+    target_end_time = target_start_time + timedelta(hours=interval_hours)
+    if target_end_time > ahora:
+        return None
+
+    return target_start_time, target_end_time, interval_hours
+
+
+# ---------------------------------------------------------------------------
 # MÉTRICAS SQL (NIVEL NEGOCIO - EJECUCIÓN LENTA)
 # ---------------------------------------------------------------------------
 def extraer_metricas_sql(sql_config, log_func=None):
@@ -272,33 +330,16 @@ def extraer_metricas_sql(sql_config, log_func=None):
 
         cursor = conn.cursor()
 
-        executions_per_day = int(sql_config.get("executions_per_day", 3))
-        if executions_per_day <= 0:
-            executions_per_day = 3
-        interval_hours = 24.0 / executions_per_day
-
-        ahora             = datetime.now()
-        ultimo_checkpoint = get_last_checkpoint()
-
-        if not ultimo_checkpoint:
-            historical_start = sql_config.get("historical_start_date")
-            if historical_start:
-                try:
-                    target_start_time = datetime.strptime(historical_start, "%Y-%m-%d")
-                    if log_func:
-                        log_func(f"🕰️ INICIANDO BACKFILL HISTÓRICO desde {historical_start}")
-                except Exception:
-                    target_start_time = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
-            else:
-                target_start_time = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            target_start_time = ultimo_checkpoint
-
-        target_end_time = target_start_time + timedelta(hours=interval_hours)
-
-        if target_end_time > ahora:
+        ventana = _calcular_ventana_extraccion(
+            sql_config.get("executions_per_day", 3),
+            sql_config.get("historical_start_date"),
+            log_func=log_func,
+        )
+        if ventana is None:
             return None
+        target_start_time, target_end_time, interval_hours = ventana
 
+        ahora = datetime.now()
         start_date_sql = target_start_time.strftime("%Y-%m-%dT%H:%M:%S")
         end_date_sql   = target_end_time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -351,6 +392,186 @@ def extraer_metricas_sql(sql_config, log_func=None):
     finally:
         if conn:
             conn.close()
+
+# ---------------------------------------------------------------------------
+# MÉTRICAS SQL — VÍA ELASTICSEARCH (mismo checkpoint, otra fuente)
+#
+# Alternativa a extraer_metricas_sql para hospitales cuyo Logstash ya publica
+# los buckets horarios de ris/pacs/users (ver elk/ext_ris_metrics.conf,
+# ext_pacs_metrics.conf, ext_users_metrics.conf). El agente deja de conectar
+# directo a SQL Server: solo suma los documentos horarios que caen dentro del
+# bloque que le toca extraer, usando el mismo checkpoint/backfill de siempre
+# (_calcular_ventana_extraccion, .sql_checkpoint compartido).
+#
+# usuarios_unicos es la única cuenta que no es una simple suma: cada bucket
+# horario trae el ARRAY de user_guid distintos de esa hora (no un conteo), y
+# acá se arma la unión a través de todas las horas del bloque antes de
+# contar — sumar "únicos por hora" sobreestimaría a quien se logueó en más
+# de una hora del mismo bloque.
+# ---------------------------------------------------------------------------
+def _buscar_bucket_horario(elastic_cfg, index_name, campo_fecha, desde, hasta, log_func=None):
+    """
+    Trae todos los documentos de `index_name` cuyo `campo_fecha` cae en
+    [desde, hasta). Pagina con search_after (mismo estilo que
+    recolectar_logs_elastic) por si el bloque abarca muchas horas/equipos.
+    """
+    host = elastic_cfg.get("host", "").strip()
+    port = elastic_cfg.get("port", 29200)
+    url  = f"http://{host}:{port}/{index_name}/_search"
+    auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) \
+        if elastic_cfg.get("user") else None
+
+    desde_iso = desde.strftime("%Y-%m-%dT%H:%M:%S")
+    hasta_iso = hasta.strftime("%Y-%m-%dT%H:%M:%S")
+
+    docs = []
+    search_after = None
+    batch_size = 1000
+
+    while True:
+        payload = {
+            "size": batch_size,
+            "query": {"range": {campo_fecha: {"gte": desde_iso, "lt": hasta_iso}}},
+            "sort": [{campo_fecha: {"order": "asc"}}, {"_id": {"order": "asc"}}],
+        }
+        if search_after:
+            payload["search_after"] = search_after
+
+        resp = requests.post(url, json=payload, auth=auth, timeout=15)
+        resp.raise_for_status()
+        hits = resp.json().get("hits", {}).get("hits", [])
+        if not hits:
+            break
+
+        docs.extend(h.get("_source", {}) for h in hits)
+        if len(hits) < batch_size:
+            break
+        search_after = hits[-1].get("sort")
+
+    return docs
+
+
+def _sumar_horas_ris(docs):
+    campos_num = ("totales", "citados", "admitidos", "ejecutados", "con_imagen",
+                  "borradores", "definitivos", "suspendidos")
+    acumulado = {}
+    for doc in docs:
+        clave = (doc.get("equipo"), doc.get("aet"), doc.get("mod"))
+        if clave not in acumulado:
+            acumulado[clave] = {"equipo": doc.get("equipo"), "aet": doc.get("aet"), "mod": doc.get("mod")}
+            acumulado[clave].update({c: 0 for c in campos_num})
+        for campo in campos_num:
+            acumulado[clave][campo] += safe_int(doc.get(campo))
+    return list(acumulado.values())
+
+
+def _sumar_horas_pacs(docs):
+    acumulado = {}
+    for doc in docs:
+        clave = (doc.get("aet"), doc.get("mod"))
+        if clave not in acumulado:
+            acumulado[clave] = {"aet": doc.get("aet"), "mod": doc.get("mod"), "almacenados": 0}
+        acumulado[clave]["almacenados"] += safe_int(doc.get("almacenados"))
+    return list(acumulado.values())
+
+
+def _sumar_horas_users(docs):
+    acumulado = {}
+    for doc in docs:
+        rol = doc.get("rol")
+        if rol not in acumulado:
+            acumulado[rol] = {"rol": rol, "inicios_sesion": 0, "_guids": set()}
+        acumulado[rol]["inicios_sesion"] += safe_int(doc.get("inicios_sesion"))
+        for guid in (doc.get("user_guids") or []):
+            acumulado[rol]["_guids"].add(guid)
+
+    return [
+        {"rol": v["rol"], "usuarios_unicos": len(v["_guids"]), "inicios_sesion": v["inicios_sesion"]}
+        for v in acumulado.values()
+    ]
+
+
+def extraer_metricas_ris_elastic(elastic_cfg, log_func=None):
+    """
+    Equivalente a extraer_metricas_sql pero leyendo de los índices horarios
+    que publica Logstash en vez de conectar directo a SQL Server. Mismo
+    contrato de retorno: None si el bloque todavía no está listo o los datos
+    no pasan la validación, o el dict con application_metrics + checkpoint
+    listo para adjuntar al envelope.
+    """
+    if not elastic_cfg or not elastic_cfg.get("host"):
+        return None
+
+    ventana = _calcular_ventana_extraccion(
+        elastic_cfg.get("ris_executions_per_day", 3),
+        elastic_cfg.get("ris_historical_start_date"),
+        log_func=log_func,
+    )
+    if ventana is None:
+        return None
+    target_start_time, target_end_time, interval_hours = ventana
+
+    start_date_sql = target_start_time.strftime("%Y-%m-%dT%H:%M:%S")
+    end_date_sql   = target_end_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    ahora = datetime.now()
+    if (ahora - target_end_time).total_seconds() > 86400:
+        if log_func:
+            log_func(f"⏳ Backfill (RIS/Elastic): Recuperando bloque [{start_date_sql} >> {end_date_sql}]...")
+    else:
+        if log_func:
+            log_func(f"⚙️ RIS/Elastic: Extrayendo bloque regular [{start_date_sql} >> {end_date_sql}]...")
+
+    idx_ris   = elastic_cfg.get("ris_index_ris")   or "ext_ris_metrics_hourly"
+    idx_pacs  = elastic_cfg.get("ris_index_pacs")  or "ext_pacs_metrics_hourly"
+    idx_users = elastic_cfg.get("ris_index_users") or "ext_users_metrics_hourly"
+
+    try:
+        docs_ris   = _buscar_bucket_horario(elastic_cfg, idx_ris,   "hour_start", target_start_time, target_end_time, log_func)
+        docs_pacs  = _buscar_bucket_horario(elastic_cfg, idx_pacs,  "hour_start", target_start_time, target_end_time, log_func)
+        docs_users = _buscar_bucket_horario(elastic_cfg, idx_users, "hour_start", target_start_time, target_end_time, log_func)
+    except Exception as e:
+        if log_func:
+            log_func(f"❌ Error consultando ElasticSearch (RIS/PACS/users): {e}")
+        return None
+
+    problema_bucket = (
+        _validar_documentos_horarios(docs_ris,   idx_ris,   _RIS_CAMPOS_STR,   _RIS_CAMPOS_NUM)
+        or _validar_documentos_horarios(docs_pacs,  idx_pacs,  _PACS_CAMPOS_STR,  _PACS_CAMPOS_NUM)
+        or _validar_documentos_horarios(docs_users, idx_users, _USERS_CAMPOS_STR, ("inicios_sesion",),
+                                         campos_lista=("user_guids",))
+    )
+    if problema_bucket:
+        if log_func:
+            log_func(
+                f"❌ Documento horario inválido en Elastic, se omite este bloque "
+                f"[{start_date_sql} → {end_date_sql}]: {problema_bucket}. Se reintentará en el próximo ciclo."
+            )
+        return None
+
+    application_metrics = {
+        "ris":   _sumar_horas_ris(docs_ris),
+        "pacs":  _sumar_horas_pacs(docs_pacs),
+        "users": _sumar_horas_users(docs_users),
+        "extraction_interval_hours": interval_hours,
+        "start_time_extraction":     start_date_sql,
+        "end_time_extraction":       end_date_sql,
+    }
+
+    problema = _validar_application_metrics(application_metrics)
+    if problema:
+        if log_func:
+            log_func(
+                f"❌ application_metrics inválido (RIS/Elastic), se omite este bloque "
+                f"[{start_date_sql} → {end_date_sql}]: {problema}. Se reintentará en el próximo ciclo."
+            )
+        return None
+
+    return {
+        "application_metrics": application_metrics,
+        "_checkpoint_to_save": target_end_time,
+    }
+
 
 # ---------------------------------------------------------------------------
 # AUTOENRUTE DICOM (vía ElasticSearch - índice de estado actual)
