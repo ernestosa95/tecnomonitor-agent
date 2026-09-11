@@ -93,7 +93,12 @@ detectan mutuamente — si conviven, duplican telemetría y corrompen los checkp
    sola vez en el propio overlay — **anotarlo antes de continuar**, no se vuelve a mostrar. En
    aperturas siguientes, se pide ese mismo código (ver [SEGURIDAD.md](./SEGURIDAD.md) para el
    mecanismo completo, la recuperación si se pierde, y sus límites actuales).
-3. Completar `Hospital ID`, `Auth Token` y `URL del servidor central`.
+3. Completar `Hospital ID`, `Auth Token` y `URL del servidor central`. **El `Auth Token` no se
+   inventa acá**: hay que generarlo antes desde el panel de administración del servidor central
+   para ese hospital puntual (alta nueva del hospital, o el botón/endpoint de regenerar token si
+   ya existe) y pegarlo tal cual — se muestra una sola vez del lado del servidor. Un token que
+   no corresponda a ese `Hospital ID` hace que el servidor rechace todos los reportes en
+   silencio (ver [CONFIGURACION.md](./CONFIGURACION.md#auth_token--de-dónde-sale-y-por-qué-tiene-que-coincidir-con-hospital_id)).
 4. Habilitar y completar cada tarjeta de integración según corresponda (ver
    [CONFIGURACION.md](./CONFIGURACION.md) para el detalle de cada campo).
 5. Usar los botones "Test conexión" de cada tarjeta antes de guardar, para validar

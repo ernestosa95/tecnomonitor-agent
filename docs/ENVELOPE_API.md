@@ -14,6 +14,14 @@ Content-Type: application/json
 Un `raise_for_status()` determina éxito/fracaso del envío; solo en caso de éxito se persisten
 los checkpoints de SQL y Elastic (ver [MODULOS.md](./MODULOS.md)).
 
+**El header `Authorization` es obligatorio desde `schema_version 4.5`** (vigente, confirmado
+por el contrato de ingesta del servidor, `2026-09-11`): el servidor identifica al hospital por
+este token, no por `envelope.hospital_id`, y rechaza el reporte completo (401, sin guardar
+nada, mensaje genérico) si el token falta o no corresponde a ese `hospital_id`. El token se
+genera por hospital desde el panel de administración del servidor — ver
+[CONFIGURACION.md](./CONFIGURACION.md#auth_token--de-dónde-sale-y-por-qué-tiene-que-coincidir-con-hospital_id)
+para el procedimiento. No es algo que el agente genere ni derive por su cuenta.
+
 ## Forma general del reporte
 
 ```jsonc

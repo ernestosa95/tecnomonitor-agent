@@ -19,6 +19,25 @@ descifran automáticamente al cargar la configuración (`security.desencriptar()
 | `central_url` | string | — | Endpoint HTTPS al que se hace `POST` con el envelope completo |
 | `interval_minutes` | int | `5` | Cada cuánto corre un ciclo completo de recolección + envío |
 
+### `auth_token` — de dónde sale y por qué tiene que coincidir con `hospital_id`
+
+Desde `schema_version 4.5` (vigente, confirmado por el contrato de ingesta del servidor —
+`2026-09-11`), el servidor **exige** este header y rechaza el reporte completo (401, sin
+guardar nada) si falta, no existe, o no corresponde al `hospital_id` declarado en el envelope.
+El mensaje de rechazo es intencionalmente genérico — no dice cuál de los tres motivos fue.
+
+- El token es **único por hospital** y se genera desde el **panel de administración del
+  servidor** (no algo que el agente genere): al dar de alta el hospital, o mediante
+  `POST /api/hospitales-metadata/{hid}/regenerar-token` para uno ya existente.
+- Se copia **una sola vez** al campo `Auth Token` de la GUI al configurar el agente — el
+  servidor no lo vuelve a mostrar después de generarlo.
+- El servidor identifica al hospital **por el token**, no por el `hospital_id` del JSON.
+  Asegurarse de que ambos correspondan al mismo hospital antes de guardar la configuración:
+  un token de otro hospital pegado por error rechaza todos los reportes en silencio.
+- Antes de instalar un agente nuevo en `schema_version 4.5` (el default desde v4.5.0, ver
+  `agent_logic.ejecutar_ciclo_agente`), generar el token de ese hospital específico desde el
+  panel — no reusar un token de otro hospital ni dejarlo vacío.
+
 ## Proxmox / VMware — `enabled_proxmox` + `proxmox`
 
 Un único bloque cubre ambos hipervisores; `proxmox.type` decide cuál se usa.

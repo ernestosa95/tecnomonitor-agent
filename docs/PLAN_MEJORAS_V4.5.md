@@ -201,16 +201,20 @@ Dos detectores del servidor asumen una cadencia de reporte que no necesariamente
 ## 2. ✅ HECHO — Preparación para autenticación obligatoria (`schema_version 4.5`)
 
 **Estado:** `schema_version` ya se bumpeó a `"4.5"` en `agent_logic.py` (junto con `agent_version`
-y el `AppVersion` del instalador, ver [CHANGELOG.md](./CHANGELOG.md#v450)). El usuario confirmó
-que el servidor central ya tiene desplegada la validación de token para esta versión de schema.
-Sigue valiendo la pena releer los puntos 1-5 de abajo antes de distribuir el build a un hospital
-nuevo (en particular el punto 3: confirmar que ese hospital tiene un `auth_token` real cargado).
+y el `AppVersion` del instalador, ver [CHANGELOG.md](./CHANGELOG.md#v450)). La versión
+actualizada del contrato de ingesta (`2026-09-11`) confirma por escrito que el gate de token ya
+está **"Implementado y desplegable"** del lado servidor — ya no es solo una confirmación verbal
+del usuario, hay un documento fechado que lo respalda. Sigue valiendo la pena releer los puntos
+1-5 de abajo antes de distribuir el build a un hospital nuevo (en particular el punto 3:
+confirmar que ese hospital tiene un `auth_token` real, generado desde el panel del servidor
+para ese hospital específico — ver [CONFIGURACION.md](./CONFIGURACION.md#auth_token--de-dónde-sale-y-por-qué-tiene-que-coincidir-con-hospital_id)).
 
-El contrato (§2bis) es explícito: a partir de `schema_version: "4.5"`, el servidor va a exigir
-`Authorization: Bearer <token>` único por hospital, y va a rechazar (401) si falta, no existe,
-o no corresponde al `hospital_id` declarado — **sin decir cuál de los tres motivos fue**. Y
-remarca: *"un agente en versión 4.5 no debe enviarse a producción contra este servidor"* hasta
-que el servidor confirme que el cambio ya está desplegado.
+El contrato (§2bis) es explícito: a partir de `schema_version: "4.5"`, el servidor **exige**
+`Authorization: Bearer <token>` único por hospital, y rechaza (401) si falta, no existe, o no
+corresponde al `hospital_id` declarado — **sin decir cuál de los tres motivos fue**. El token se
+genera desde el panel de administración del servidor (alta del hospital, o
+`POST /api/hospitales-metadata/{hid}/regenerar-token` para uno ya existente) — nunca del lado
+del agente.
 
 Buenas noticias: el agente **ya envía** `Authorization: Bearer {auth_token}` en cada request
 (`agent_logic.py:1573`), con el token guardado cifrado (`security.py`) y configurable por la
