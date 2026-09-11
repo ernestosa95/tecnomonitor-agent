@@ -47,16 +47,19 @@ hace hoy SQL Server sobre el bloque completo, sin importar en cuántas horas se 
 ## Arquitectura
 
 ```
-Tarea Programada de Windows (una por pipeline, cada 1 hora)
-   │  dispara el .bat correspondiente
+Tarea Programada de Windows "TecnoMonitor_KPIs_Negocio" (cada 1 hora)
+   │  dispara ext_kpis_negocio-all-sito.bat
    ▼
-ext_ris_metrics-sito.bat / ext_pacs_metrics-sito.bat / ext_users_metrics-sito.bat
-   │  CALL logstash.bat -f <pipeline>.conf   (Logstash corre UNA VEZ y termina solo)
+ext_kpis_negocio-all-sito.bat
+   │  CALL logstash.bat -f ext_ris_metrics.conf     (corre, termina)
+   │  CALL logstash.bat -f ext_pacs_metrics.conf    (corre, termina)
+   │  CALL logstash.bat -f ext_users_metrics.conf   (corre, termina)
    ▼
 SQL Server del hospital
    │  (mismas tablas/columnas que SQL_QUERY en agent_logic.py, ventana = última hora cerrada)
    ▼
-Logstash — upsert idempotente (document_id determinístico por hora+clave)
+Logstash — upsert idempotente (document_id determinístico por hora+clave), un proceso
+           independiente por CALL — no se mezclan datos entre los tres
    ▼
 ElasticSearch — 3 índices nuevos: ext_ris_metrics_hourly, ext_pacs_metrics_hourly,
                 ext_users_metrics_hourly
@@ -65,8 +68,15 @@ agent_logic.extraer_metricas_ris_elastic()  ←  reemplaza a extraer_metricas_sq
    (mismo checkpoint .sql_checkpoint, mismo application_metrics de salida)
 ```
 
-Cada uno de los 3 pipelines es completamente independiente (su propio `.conf`, su propio
-`.bat`, su propia Tarea Programada) — no dependen entre sí ni de `ext_dicom_queues`.
+**Agrupados en una sola Tarea Programada** (`ext_kpis_negocio-all-sito.bat`, con un `CALL
+logstash.bat` secuencial por `.conf` — mismo patrón que ya usan los `.bat` "-all-" existentes
+del hospital, ej. `ext_cardiocath-all-sito.bat`), porque los tres comparten la misma cadencia
+(cada 1 hora). Cada `CALL` sigue siendo un proceso Logstash independiente y autocontenido — no
+hay mezcla de datos entre índices, solo se ejecutan uno atrás del otro. Al sumar una medición
+nueva con esta misma cadencia horaria, agregar otro bloque `CALL`/`timeout` a este mismo `.bat`
+en vez de crear una tarea nueva — la cantidad de tareas depende de cuántas **cadencias**
+distintas necesites, no de cuántos `.conf` tengas. `ext_dicom_queues` queda con su propio `.bat`
+y tarea aparte porque necesita una cadencia más agresiva (cada 5 min, no cada 1 hora).
 
 ## Mapping de los índices nuevos
 
@@ -118,10 +128,15 @@ Cada uno de los 3 pipelines es completamente independiente (su propio `.conf`, s
   `schedule => "*/5 * * * *"` al `.conf` y no usar el `.bat` de acá. Solo tiene un `output`
   (índice de estado actual) — no incluye el índice histórico que menciona la guía original para
   Kibana, ya que el agente no lo lee y no está en el alcance de este ciclo.
-- `ext_dicom_queues-sito.bat`, `ext_ris_metrics-sito.bat`, `ext_pacs_metrics-sito.bat`,
-  `ext_users_metrics-sito.bat`: calco del patrón `CALL ...\logstash.bat -f ...conf` +
-  `timeout /t 30 /nobreak` ya usado por los demás pipelines del hospital. Cada uno necesita su
-  propia Tarea Programada (ver más abajo) — no hay un `.bat`/tarea compartido entre los cuatro.
+- `ext_dicom_queues-sito.bat`: calco del patrón `CALL ...\logstash.bat -f ...conf` +
+  `timeout /t 30 /nobreak` de un `.conf` individual, ya usado por varios pipelines del hospital.
+  Necesita su propia Tarea Programada, cadencia cada 5 min.
+- `ext_kpis_negocio-all-sito.bat`: agrupa `ext_ris_metrics.conf`, `ext_pacs_metrics.conf` y
+  `ext_users_metrics.conf` en un solo `.bat` (tres `CALL` secuenciales, cada uno un proceso
+  Logstash independiente) — mismo patrón que los `.bat` "-all-" existentes del hospital
+  (`ext_cardiocath-all-sito.bat` y similares). Una sola Tarea Programada para los tres, cadencia
+  cada 1 hora. Para sumar una medición nueva con esta misma cadencia, agregar otro bloque
+  `CALL`/`timeout` acá en vez de crear una tarea nueva.
 
 Placeholders a completar antes de usar: `<PASSWORD>` (contraseña del usuario SQL, la misma que
 ya usan los demás `.conf` de ese servidor) y `<ELASTIC_HOST>` (IP del cluster Elastic, la misma
@@ -147,13 +162,12 @@ adaptación del punto de conexión y el cambio de `schedule =>` descriptos arrib
    ```
    Confirmar en Kibana Dev Tools (`GET ext_ris_metrics_hourly/_search`) que aparecen documentos
    con la forma esperada (ver mapping abajo) antes de seguir. Repetir para los otros dos.
-3. **Crear una Tarea Programada por cada `.bat`**, apuntando al `.bat` correspondiente — mismo
-   criterio que ya usan las tareas existentes de este hospital para los demás pipelines (mirar
-   una tarea ya existente en el Programador de Tareas para copiar su configuración exacta:
-   usuario, reintentos, etc.). Cadencia: **cada 1 hora** para `ext_ris_metrics`/
-   `ext_pacs_metrics`/`ext_users_metrics` (coincide con la ventana horaria que calcula la
-   propia query); **cada 5 minutos** para `ext_dicom_queues` (misma cadencia que tenía su
-   `schedule =>` original).
+3. **Crear dos Tareas Programadas** (no cuatro — ver "Arquitectura" arriba): una para
+   `ext_dicom_queues-sito.bat` (cada 5 min) y otra para `ext_kpis_negocio-all-sito.bat` (cada 1
+   hora, dispara los tres pipelines de KPIs en secuencia). Lo más seguro es exportar (`.xml`)
+   una tarea ya existente del hospital para ese `.bat` individual, importarla, y solo cambiarle
+   el nombre, la ruta del `.bat` y el desencadenador de repetición — así se hereda automáticamente
+   la configuración de usuario/privilegios/reintentos ya validada en ese sitio, sin adivinarla.
 4. Si vas a instalar `ext_dicom_queues` en un hospital que **nunca lo tuvo**, no hay nada que
    cuidar de romper — es alta nueva, no migración. Si en cambio ya existe un
    `ext_dicom_queues.conf` corriendo como proceso persistente con `schedule =>` interno (el
