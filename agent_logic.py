@@ -1,6 +1,8 @@
 import requests
 import wmi
 import pythoncom
+import paramiko
+import hashlib
 import time
 import socket
 import urllib3
@@ -32,7 +34,84 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ELASTIC_CHECKPOINT_FILE = os.path.join(DATA_DIR, ".elastic_checkpoint")
 UNKNOWNS_LAB_FILE = os.path.join(DATA_DIR, "unknowns_lab.json")
 # Asumimos que distribuirás el 'rules.json' junto al ejecutable o en el DATA_DIR
-RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json") 
+RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
+# Checksum opcional de rules.json (ver docs/SEGURIDAD.md §3.6) — si build.bat
+# lo generó y lo empaquetó junto al .exe, se valida al cargar las reglas.
+RULES_FILE_SHA256 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json.sha256")
+
+
+def _rules_json_integro(log_func=None):
+    """
+    Verificación opcional de integridad de rules.json (ver
+    docs/PLAN_MEJORAS_V4.5.md §3.6). Si no existe rules.json.sha256 (builds
+    de antes de este cambio, o quien corre desde código fuente sin
+    regenerarlo), se omite el chequeo y se sigue como siempre — no rompe
+    nada retroactivamente. Si existe y no coincide, se tratan las reglas
+    como no confiables: se omiten este ciclo (fail-safe) en vez de usarlas
+    a ciegas.
+    """
+    if not os.path.exists(RULES_FILE_SHA256):
+        return True
+    try:
+        with open(RULES_FILE, 'rb') as f:
+            hash_real = hashlib.sha256(f.read()).hexdigest()
+        with open(RULES_FILE_SHA256, 'r', encoding='utf-8') as f:
+            # Tolera tanto "hash" solo como el formato "hash  nombre_archivo"
+            # que generan sha256sum/certutil.
+            hash_esperado = f.read().strip().split()[0].lower()
+        if hash_real.lower() != hash_esperado:
+            if log_func:
+                log_func("🚨 rules.json no coincide con su checksum esperado (rules.json.sha256) "
+                          "— se omiten las reglas este ciclo, posible modificación no autorizada del archivo.")
+            return False
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ No se pudo verificar la integridad de rules.json: {e}")
+    return True
+
+# ---------------------------------------------------------------------------
+# VERSIÓN — fuente única de verdad en /VERSION (ver docs/PLAN_MEJORAS_V4.5.md
+# §6). agent_version es el contenido tal cual (ej. "4.5.0"); schema_version
+# es major.minor (ej. "4.5") — mismo criterio que ya se usaba a mano antes de
+# esto. build.bat empaqueta VERSION junto al ejecutable (--add-data), igual
+# que rules.json; si por algún motivo no está (build roto, ejecución desde
+# código fuente sin el archivo), cae a un default hardcodeado en vez de
+# romper el arranque del agente.
+# ---------------------------------------------------------------------------
+def _leer_version():
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            valor = f.read().strip()
+            if valor:
+                return valor
+    except Exception:
+        pass
+    return "4.5.0"
+
+
+AGENT_VERSION  = _leer_version()
+SCHEMA_VERSION = ".".join(AGENT_VERSION.split(".")[:2]) if AGENT_VERSION else "4.5"
+
+# Rollback de emergencia (ver docs/PLAN_MEJORAS_V4.5.md §2, riesgo 5): un
+# archivo interno, NO expuesto en la GUI, que si existe fuerza el
+# schema_version a enviar. Pensado para revertir un hospital a "4.3" (formato
+# sin exigencia de token) sin recompilar, si algo sale mal desplegando la
+# autenticación obligatoria — se crea/borra a mano en
+# ProgramData\TecnoMonitor\schema_version_override.txt.
+SCHEMA_VERSION_OVERRIDE_FILE = os.path.join(DATA_DIR, "schema_version_override.txt")
+
+
+def _schema_version_efectiva():
+    if os.path.exists(SCHEMA_VERSION_OVERRIDE_FILE):
+        try:
+            with open(SCHEMA_VERSION_OVERRIDE_FILE, "r", encoding="utf-8") as f:
+                valor = f.read().strip()
+            if valor:
+                return valor
+        except Exception:
+            pass
+    return SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # QUERY SQL (sin cambios de lógica, solo se mantiene)
@@ -134,6 +213,20 @@ def verificar_puerto(ip, puerto, timeout=2):
     except Exception:
         return False
 
+def _esquema_elastic(cfg):
+    """
+    HTTPS opcional para ElasticSearch (ver docs/PLAN_MEJORAS_V4.5.md §3.3):
+    por defecto sigue siendo http:// (mismo comportamiento de siempre, cero
+    migración para configs existentes) — si el hospital marca "Usar HTTPS"
+    en la tarjeta de Elastic, se arma la URL con https:// en su lugar. Se usa
+    `verify=False` en los requests igual que con https activado, porque el
+    caso típico es un certificado autofirmado del propio clúster interno del
+    hospital, no uno emitido por una CA pública (mismo criterio ya aceptado
+    para iDRAC y el servidor central — ver SEGURIDAD.md, pendiente §3.4).
+    """
+    return "https" if cfg.get("use_https") else "http"
+
+
 def parse_wmi_date(wmi_date):
     try:
         return datetime.strptime(wmi_date.split('.')[0], "%Y%m%d%H%M%S")
@@ -180,17 +273,18 @@ def _ruta_checkpoint_sql(hospital_id):
     return path
 
 
-def get_last_checkpoint(hospital_id):
+def get_last_checkpoint(hospital_id, log_func=None):
     path = _ruta_checkpoint_sql(hospital_id)
     if os.path.exists(path):
         try:
             with open(path, 'r') as f:
                 return datetime.strptime(f.read().strip(), "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            pass
+        except Exception as e:
+            if log_func:
+                log_func(f"⚠️ Checkpoint SQL de [{hospital_id}] ilegible, se ignora: {e}")
     return None
 
-def save_checkpoint(hospital_id, dt):
+def save_checkpoint(hospital_id, dt, log_func=None):
     """Escritura atómica: escribe en .tmp y renombra. Nunca deja el archivo a medias."""
     path = _ruta_checkpoint_sql(hospital_id)
     try:
@@ -198,17 +292,19 @@ def save_checkpoint(hospital_id, dt):
         with open(tmp, 'w') as f:
             f.write(dt.strftime("%Y-%m-%d %H:%M:%S"))
         os.replace(tmp, path)
-    except Exception:
-        pass
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ No se pudo guardar el checkpoint SQL de [{hospital_id}]: {e}")
 
-def reset_checkpoint(hospital_id):
+def reset_checkpoint(hospital_id, log_func=None):
     path = _ruta_checkpoint_sql(hospital_id)
     for p in [path, path + ".tmp"]:
         if os.path.exists(p):
             try:
                 os.remove(p)
-            except Exception:
-                pass
+            except Exception as e:
+                if log_func:
+                    log_func(f"⚠️ No se pudo borrar {p}: {e}")
 
 
 def _ruta_checkpoint_elastic(hospital_id):
@@ -454,7 +550,7 @@ def _calcular_ventana_extraccion(hospital_id, executions_per_day_raw, historical
     interval_hours = 24.0 / executions_per_day
 
     ahora             = datetime.now()
-    ultimo_checkpoint = get_last_checkpoint(hospital_id)
+    ultimo_checkpoint = get_last_checkpoint(hospital_id, log_func=log_func)
 
     if not ultimo_checkpoint:
         if historical_start_date:
@@ -583,7 +679,7 @@ def _buscar_bucket_horario(elastic_cfg, index_name, campo_fecha, desde, hasta, l
     """
     host = elastic_cfg.get("host", "").strip()
     port = elastic_cfg.get("port", 29200)
-    url  = f"http://{host}:{port}/{index_name}/_search"
+    url  = f"{_esquema_elastic(elastic_cfg)}://{host}:{port}/{index_name}/_search"
     auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) \
         if elastic_cfg.get("user") else None
 
@@ -603,7 +699,7 @@ def _buscar_bucket_horario(elastic_cfg, index_name, campo_fecha, desde, hasta, l
         if search_after:
             payload["search_after"] = search_after
 
-        resp = requests.post(url, json=payload, auth=auth, timeout=15)
+        resp = requests.post(url, json=payload, auth=auth, timeout=15, verify=False)
         resp.raise_for_status()
         hits = resp.json().get("hits", {}).get("hits", [])
         if not hits:
@@ -767,7 +863,7 @@ def get_dicom_routing_queues(elastic_cfg, log_func=None):
     except (TypeError, ValueError):
         max_age = 15
 
-    url  = f"http://{host}:{port}/{index_name}/_search"
+    url  = f"{_esquema_elastic(elastic_cfg)}://{host}:{port}/{index_name}/_search"
     auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) \
         if elastic_cfg.get("user") else None
 
@@ -781,7 +877,7 @@ def get_dicom_routing_queues(elastic_cfg, log_func=None):
     }
 
     try:
-        resp = requests.post(url, json=payload, auth=auth, timeout=15)
+        resp = requests.post(url, json=payload, auth=auth, timeout=15, verify=False)
         resp.raise_for_status()
         hits = resp.json().get("hits", {}).get("hits", [])
     except Exception as e:
@@ -879,13 +975,13 @@ def test_connection_dicom_index(data):
         return {"success": False, "msg": "Host de ElasticSearch no configurado"}
 
     auth = HTTPBasicAuth(data.get("user", ""), data.get("pass", "")) if data.get("user") else None
-    url  = f"http://{host}:{port}/{index}/_search"
+    url  = f"{_esquema_elastic(data)}://{host}:{port}/{index}/_search"
 
     try:
         r = requests.post(
             url,
             json={"size": 1, "docvalue_fields": [{"field": "@timestamp", "format": "epoch_millis"}]},
-            auth=auth, timeout=8
+            auth=auth, timeout=8, verify=False
         )
     except Exception as e:
         return {"success": False, "msg": f"Error de conexión: {e}"}
@@ -945,9 +1041,9 @@ def test_connection_ris_metrics(data):
 
     resultados = []
     for etiqueta, index in indices.items():
-        url = f"http://{host}:{port}/{index}/_search"
+        url = f"{_esquema_elastic(data)}://{host}:{port}/{index}/_search"
         try:
-            r = requests.post(url, json={"size": 1, "query": {"match_all": {}}}, auth=auth, timeout=8)
+            r = requests.post(url, json={"size": 1, "query": {"match_all": {}}}, auth=auth, timeout=8, verify=False)
         except Exception as e:
             resultados.append(f"{etiqueta} ('{index}'): error de conexión — {e}")
             continue
@@ -1248,8 +1344,6 @@ def obtener_storage_fisico_v3(config, log_func=None):
     Recorre la API Redfish de iDRAC de forma PARALELA.
     Evita alcanzar el timeout global de 60s en servidores de PACS con múltiples arreglos RAID.
     """
-    import concurrent.futures
-
     if log_func:
         log_func(f"📦 Recolectando Storage iDRAC (RAID) Concurrente: {config.get('ip')}")
 
@@ -1290,7 +1384,7 @@ def obtener_storage_fisico_v3(config, log_func=None):
                 return None
 
         # 1. Obtener Controladoras en paralelo
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             controllers_raw = list(executor.map(fetch_controller, members))
 
         volumes_urls = []
@@ -1319,7 +1413,10 @@ def obtener_storage_fisico_v3(config, log_func=None):
                 drives_urls.append(d['@odata.id'])
 
         # 2. Obtener Volúmenes Lógicos y Discos Físicos en paralelo
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # v4.6: bajado de 10 a 4 workers (ver docs/PLAN_MEJORAS_V4.5.md §5.2)
+        # — los BMC Dell suelen tener límites bajos de sesiones concurrentes;
+        # 10 en paralelo arriesgaba 503/timeouts intermitentes en RAID grandes.
+        with ThreadPoolExecutor(max_workers=4) as executor:
             volumes_raw = list(executor.map(fetch_volume, volumes_urls))
             drives_raw = list(executor.map(fetch_drive, drives_urls))
 
@@ -1388,6 +1485,7 @@ def _recolectar_wmi_interno(vm_info, log_func):
     vm_obj = {
         "id":                nombre_manual if nombre_manual else ip,
         "type":              tipo_maquina,
+        "os":                "windows",
         "state":             "Offline",
         "state_reason":      "unknown",
         "telemetry":         {},
@@ -1498,9 +1596,9 @@ def _recolectar_wmi_interno(vm_info, log_func):
                 })
 
     except Exception as e:
-        vm_obj["state"]        = "Offline"
-        vm_obj["state_reason"] = "wmi_error"
-        vm_obj["wmi_error"]    = str(e)
+        vm_obj["state"]          = "Offline"
+        vm_obj["state_reason"]   = "wmi_error"
+        vm_obj["collection_error"] = str(e)
         if log_func:
             log_func(f"⚠️ Error WMI ({tipo_maquina.upper()}) {ip}: {e}")
     finally:
@@ -1509,31 +1607,285 @@ def _recolectar_wmi_interno(vm_info, log_func):
     return vm_obj
 
 
+# ---------------------------------------------------------------------------
+# SSH — VMs y equipos Linux (v4.6, mismo patrón que WMI pero para Linux)
+#
+# Mismo vm_obj de salida que _recolectar_wmi_interno (ver
+# docs/PLAN_MEJORAS_V4.5.md §9.2 y docs/CONTRATO_AGENTE.md §5). Dos campos sin
+# equivalente limpio en Linux, resueltos sin forzar un dato falso:
+#   - storage[].performance: se omite (mapear mountpoint->device real en
+#     LVM/RAID para sacar una latencia comparable agrega complejidad para un
+#     dato que nadie pidió todavía).
+#   - vital_signs.handles: se reemplaza por la cantidad de file descriptors
+#     abiertos del proceso (mismo propósito práctico, no es el mismo número).
+# ---------------------------------------------------------------------------
+def test_connection_vm_ssh(vm_info):
+    ip = vm_info.get("ip")
+    if not verificar_puerto(ip, 22):
+        return {"success": False, "msg": "Puerto 22 cerrado"}
+    try:
+        cliente = paramiko.SSHClient()
+        cliente.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        cliente.connect(
+            ip,
+            username=vm_info.get("user"),
+            password=vm_info.get("pass"),
+            timeout=10,
+            banner_timeout=10,
+            auth_timeout=10,
+        )
+        _, stdout, _ = cliente.exec_command("hostname", timeout=10)
+        hostname = stdout.read().decode("utf-8", errors="replace").strip()
+        return {"success": True, "msg": f"SSH OK: {hostname}", "hostname": hostname}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
+    finally:
+        try:
+            cliente.close()
+        except Exception:
+            pass
+
+
+def _ejecutar_ssh(cliente, comando, timeout=15):
+    """Corre un comando y devuelve (stdout, stderr) como texto. No revisa el
+    exit status: cada llamador decide qué hacer con una salida vacía."""
+    _, stdout, stderr = cliente.exec_command(comando, timeout=timeout)
+    out = stdout.read().decode("utf-8", errors="replace")
+    err = stderr.read().decode("utf-8", errors="replace")
+    return out, err
+
+
+def _leer_cpu_stat(cliente):
+    """Una lectura de /proc/stat (línea 'cpu '): (total, idle) en jiffies."""
+    out, _ = _ejecutar_ssh(cliente, "grep '^cpu ' /proc/stat")
+    valores = [safe_int(v) for v in out.split()[1:]]
+    if len(valores) < 5:
+        return None
+    idle  = valores[3]
+    total = sum(valores)
+    return total, idle
+
+
+def _recolectar_ssh_interno(vm_info, log_func):
+    """
+    Ejecutado en un thread separado con timeout controlado desde
+    obtener_vm_data(). Retorna el objeto vm_obj completo, misma forma que
+    _recolectar_wmi_interno.
+    """
+    ip             = vm_info.get("ip")
+    tipo_maquina   = vm_info.get("type", "vm")
+    nombre_manual  = vm_info.get("nombre", "").strip()
+
+    vm_obj = {
+        "id":                nombre_manual if nombre_manual else ip,
+        "type":              tipo_maquina,
+        "os":                "linux",
+        "state":             "Offline",
+        "state_reason":      "unknown",
+        "telemetry":         {},
+        "storage":           [],
+        "application_layer": {"services": []},
+    }
+
+    if not verificar_puerto(ip, 22):
+        vm_obj["state_reason"] = "port_closed"
+        return vm_obj
+
+    cliente = None
+    try:
+        cliente = paramiko.SSHClient()
+        cliente.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        cliente.connect(
+            ip,
+            username=vm_info.get("user"),
+            password=vm_info.get("pass"),
+            timeout=10,
+            banner_timeout=10,
+            auth_timeout=10,
+        )
+
+        hostname_real, _ = _ejecutar_ssh(cliente, "hostname")
+        hostname_real    = hostname_real.strip()
+        vm_obj["id"]     = nombre_manual if nombre_manual else (hostname_real or ip)
+        vm_obj["state"]  = "Online"
+        vm_obj["state_reason"] = "ok"
+
+        # --- RAM + uptime: una sola ida y vuelta ---
+        meminfo_out, _ = _ejecutar_ssh(
+            cliente,
+            "awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{print t, a}' /proc/meminfo"
+        )
+        t_ram_kb, disp_ram_kb = (safe_int(v) for v in (meminfo_out.split() + [0, 0])[:2])
+        u_ram_kb = max(0, t_ram_kb - disp_ram_kb)
+
+        uptime_out, _ = _ejecutar_ssh(cliente, "cat /proc/uptime")
+        uptime_seconds = int(safe_float(uptime_out.split()[0])) if uptime_out.split() else 0
+
+        # --- CPU: dos muestras de /proc/stat con ~1s de espera (mismo patrón
+        # de muestreo antes/después que obtener_salud_red_pasiva) ---
+        muestra_1 = _leer_cpu_stat(cliente)
+        time.sleep(1.0)
+        muestra_2 = _leer_cpu_stat(cliente)
+
+        cpu_usage_percent = 0.0
+        if muestra_1 and muestra_2:
+            total_1, idle_1 = muestra_1
+            total_2, idle_2 = muestra_2
+            delta_total = total_2 - total_1
+            delta_idle  = idle_2 - idle_1
+            if delta_total > 0:
+                cpu_usage_percent = round((1 - (delta_idle / delta_total)) * 100, 2)
+
+        vm_obj["telemetry"] = {
+            "cpu": {"usage_percent": cpu_usage_percent},
+            "ram": {
+                "total_gb":      round(t_ram_kb / 1048576, 2),
+                "used_gb":       round(u_ram_kb / 1048576, 2),
+                "usage_percent": round((u_ram_kb / t_ram_kb) * 100, 2) if t_ram_kb > 0 else 0,
+            },
+            "uptime_seconds": uptime_seconds,
+        }
+
+        # --- Disco: df, filtrando filesystems que no son discos reales ---
+        df_out, _ = _ejecutar_ssh(
+            cliente,
+            "df -P -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null | tail -n +2"
+        )
+        for linea in df_out.splitlines():
+            campos = linea.split()
+            if len(campos) < 6:
+                continue
+            _, size_bytes, _, avail_bytes, _, mount_point = campos[:6]
+            size_bytes  = safe_int(size_bytes)
+            avail_bytes = safe_int(avail_bytes)
+            usados      = max(0, size_bytes - avail_bytes)
+            vm_obj["storage"].append({
+                "mount_point":   mount_point,
+                "total_gb":      round(size_bytes  / 1073741824, 2),
+                "free_gb":       round(avail_bytes / 1073741824, 2),
+                "usage_percent": round((usados / size_bytes) * 100, 1) if size_bytes > 0 else 0,
+                # Sin "performance": no hay un equivalente confiable a la
+                # latencia de disco de WMI sin mapear mountpoint->device real
+                # (LVM/RAID) — ver docs/PLAN_MEJORAS_V4.5.md §9.2.
+            })
+
+        # --- Servicios (unidades systemd) ---
+        servicios_cfg = vm_info.get("servicios", "")
+        if isinstance(servicios_cfg, list):
+            servicios = [s.strip() for s in servicios_cfg if s.strip()]
+        else:
+            servicios = [s.strip() for s in servicios_cfg.split(",") if s.strip()]
+
+        for unidad in servicios:
+            estado_out, _ = _ejecutar_ssh(
+                cliente,
+                f"systemctl show {unidad} --property=ActiveState,SubState,MainPID --value"
+            )
+            partes = estado_out.strip().splitlines()
+            if len(partes) < 3:
+                continue
+            active_state, sub_state, main_pid = partes[0], partes[1], safe_int(partes[2])
+
+            v = {"pid": main_pid, "health": "OK", "cpu_percent": 0.0, "ram_mb": 0.0, "threads": 0, "handles": 0}
+            if main_pid > 0:
+                ps_out, _ = _ejecutar_ssh(cliente, f"ps -o %cpu,rss,nlwp --no-headers -p {main_pid}")
+                ps_valores = ps_out.split()
+                if len(ps_valores) == 3:
+                    v.update({
+                        "cpu_percent": safe_float(ps_valores[0]),
+                        "ram_mb":      round(safe_int(ps_valores[1]) / 1024, 1),
+                        "threads":     safe_int(ps_valores[2]),
+                    })
+                fd_out, _ = _ejecutar_ssh(cliente, f"ls /proc/{main_pid}/fd 2>/dev/null | wc -l")
+                # "handles" en una entrada Linux son file descriptors abiertos,
+                # no el mismo concepto que en Windows — ver docs/CONTRATO_AGENTE.md.
+                v["handles"] = safe_int(fd_out.strip())
+
+            vm_obj["application_layer"]["services"].append({
+                "name": unidad, "display_name": unidad,
+                "state": "Running" if active_state == "active" else sub_state or active_state,
+                "vital_signs": v,
+            })
+
+    except Exception as e:
+        vm_obj["state"]            = "Offline"
+        vm_obj["state_reason"]     = "ssh_error"
+        vm_obj["collection_error"] = str(e)
+        if log_func:
+            log_func(f"⚠️ Error SSH ({tipo_maquina.upper()}) {ip}: {e}")
+    finally:
+        if cliente:
+            try:
+                cliente.close()
+            except Exception:
+                pass
+
+    return vm_obj
+
+
+_hilos_recoleccion_vm_activos = 0
+_lock_hilos_recoleccion_vm    = threading.Lock()
+UMBRAL_ALERTA_HILOS_HUERFANOS = 10  # ver docs/PLAN_MEJORAS_V4.5.md §4.3
+
+
 def obtener_vm_data(args):
     """
     Wrapper con timeout global de 90s por VM para evitar threads colgados.
+    Despacha a WMI o SSH según vm_info["os"] ("windows" por default, para no
+    romper configs existentes que no tienen este campo — ver
+    docs/PLAN_MEJORAS_V4.5.md §9.2).
+
+    No hay forma segura de cancelar un hilo de Python a mitad de una llamada
+    WMI/SSH colgada (§4.3 del plan) — si el timeout se cumple, el hilo (y su
+    sesión COM en el caso WMI) queda huérfano corriendo en segundo plano
+    hasta que termine por su cuenta o el proceso se reinicie. Lo que sí se
+    puede hacer, y es lo que se agrega acá, es contar cuántos de estos hilos
+    siguen vivos simultáneamente — sin esto, una acumulación silenciosa solo
+    se notaba como un problema de memoria/CPU genérico, difícil de rastrear
+    hasta este módulo.
     """
+    global _hilos_recoleccion_vm_activos
+
     vm_info, log_func = args
     ip            = vm_info.get("ip", "?")
     nombre_manual = vm_info.get("nombre", "").strip()
+    es_linux      = vm_info.get("os", "windows") == "linux"
 
     resultado_holder = [None]
 
     def _worker():
-        resultado_holder[0] = _recolectar_wmi_interno(vm_info, log_func)
+        global _hilos_recoleccion_vm_activos
+        with _lock_hilos_recoleccion_vm:
+            _hilos_recoleccion_vm_activos += 1
+        try:
+            if es_linux:
+                resultado_holder[0] = _recolectar_ssh_interno(vm_info, log_func)
+            else:
+                resultado_holder[0] = _recolectar_wmi_interno(vm_info, log_func)
+        finally:
+            with _lock_hilos_recoleccion_vm:
+                _hilos_recoleccion_vm_activos -= 1
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     t.join(timeout=90)
 
     if resultado_holder[0] is None:
+        protocolo = "SSH" if es_linux else "WMI"
+        with _lock_hilos_recoleccion_vm:
+            hilos_activos = _hilos_recoleccion_vm_activos
         if log_func:
-            log_func(f"⏱️ Timeout WMI ({ip}): no respondió en 90s")
+            log_func(f"⏱️ Timeout {protocolo} ({ip}): no respondió en 90s. "
+                      f"Hilos de recolección todavía activos (incluye huérfanos de timeouts previos): {hilos_activos}")
+            if hilos_activos >= UMBRAL_ALERTA_HILOS_HUERFANOS:
+                log_func(f"🚨 Posible fuga de hilos WMI/SSH: {hilos_activos} hilos de recolección "
+                         f"corriendo en simultáneo. Si esto crece ciclo tras ciclo, considerar reiniciar el servicio.")
         return {
             "id":                nombre_manual if nombre_manual else ip,
             "type":              vm_info.get("type", "vm"),
+            "os":                "linux" if es_linux else "windows",
             "state":             "Offline",
-            "state_reason":      "wmi_timeout",
+            "state_reason":      "ssh_timeout" if es_linux else "wmi_timeout",
             "telemetry":         {},
             "storage":           [],
             "application_layer": {"services": []},
@@ -1732,10 +2084,10 @@ def test_connection_elastic(data):
     try:
         host = data.get("host", "").strip()
         port = data.get("port", 9200)
-        url = f"http://{host}:{port}/"
+        url = f"{_esquema_elastic(data)}://{host}:{port}/"
         auth = HTTPBasicAuth(data.get("user", ""), data.get("pass", "")) if data.get("user") else None
-        
-        r = requests.get(url, auth=auth, timeout=5)
+
+        r = requests.get(url, auth=auth, timeout=5, verify=False)
         if r.status_code == 200:
             return {"success": True, "msg": "Conexión a ElasticSearch OK"}
         return {"success": False, "msg": f"HTTP {r.status_code}"}
@@ -1747,7 +2099,7 @@ def recolectar_logs_elastic(elastic_cfg, hospital_id, global_interval_minutes=5,
 
     # 1. CARGAR Y PRE-COMPILAR REGLAS
     rules = []
-    if os.path.exists(RULES_FILE):
+    if os.path.exists(RULES_FILE) and _rules_json_integro(log_func):
         try:
             with open(RULES_FILE, 'r', encoding='utf-8') as f:
                 raw_rules = json.load(f)
@@ -1777,14 +2129,24 @@ def recolectar_logs_elastic(elastic_cfg, hospital_id, global_interval_minutes=5,
     # 3. PAGINACIÓN CON SEARCH_AFTER (Escalabilidad)
     host = elastic_cfg.get("host", "").strip()
     port = elastic_cfg.get("port", 29200)
-    index_pattern = elastic_cfg.get("index_pattern", "se-es-logging-*") 
-    url = f"http://{host}:{port}/{index_pattern}/_search"
+    index_pattern = elastic_cfg.get("index_pattern", "se-es-logging-*")
+    url = f"{_esquema_elastic(elastic_cfg)}://{host}:{port}/{index_pattern}/_search"
     auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
 
     all_hits = []
     search_after = None
-    batch_size = 1000 
-    
+    batch_size = 1000
+    # Tope de seguridad (ver docs/PLAN_MEJORAS_V4.5.md §4.2): sin esto, una
+    # caída larga de Elastic (o del agente) podía dejar una ventana enorme
+    # pendiente y el ciclo se colgaba paginando sin límite. Cortar acá no
+    # pierde nada — el checkpoint solo avanza hasta el último documento
+    # efectivamente procesado (`newest_ts` más abajo), así que lo que quede
+    # afuera de este corte se retoma en el próximo ciclo.
+    MAX_PAGINAS_ELASTIC = 200
+    MAX_SEGUNDOS_PAGINACION_ELASTIC = 60
+    paginas = 0
+    inicio_paginacion = time.time()
+
     try:
         while True:
             payload = {
@@ -1795,23 +2157,36 @@ def recolectar_logs_elastic(elastic_cfg, hospital_id, global_interval_minutes=5,
                 ]}},
                 "sort": [{"@timestamp": {"order": "asc"}}, {"_id": {"order": "asc"}}]
             }
-            
+
             if search_after:
                 payload["search_after"] = search_after
 
-            resp = requests.post(url, json=payload, auth=auth, timeout=15)
+            resp = requests.post(url, json=payload, auth=auth, timeout=15, verify=False)
             resp.raise_for_status()
             data = resp.json()
             hits = data.get('hits', {}).get('hits', [])
-            
+
             if not hits:
-                break 
-                
+                break
+
             all_hits.extend(hits)
-            
+            paginas += 1
+
             if len(hits) < batch_size:
                 break
-                
+
+            if paginas >= MAX_PAGINAS_ELASTIC:
+                if log_func:
+                    log_func(f"⚠️ Elastic: tope de {MAX_PAGINAS_ELASTIC} páginas alcanzado, "
+                              f"se corta y se continúa en el próximo ciclo.")
+                break
+
+            if time.time() - inicio_paginacion > MAX_SEGUNDOS_PAGINACION_ELASTIC:
+                if log_func:
+                    log_func(f"⚠️ Elastic: tope de {MAX_SEGUNDOS_PAGINACION_ELASTIC}s de paginación "
+                              f"alcanzado, se corta y se continúa en el próximo ciclo.")
+                break
+
             search_after = hits[-1].get('sort')
 
         if log_func:
@@ -1938,8 +2313,8 @@ def ejecutar_ciclo_agente(config, log_callback=None):
 
     reporte = {
         "envelope": {
-            "schema_version": "4.5",
-            "agent_version":  "4.5.0",
+            "schema_version": _schema_version_efectiva(),
+            "agent_version":  AGENT_VERSION,
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },
@@ -2102,7 +2477,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         if "_sql_data_payload" in config:
             checkpoint_dt = config["_sql_data_payload"].get("_checkpoint_to_save")
             if checkpoint_dt:
-                save_checkpoint(config.get("hospital_id"), checkpoint_dt)
+                save_checkpoint(config.get("hospital_id"), checkpoint_dt, log_func=log_callback)
                 if log_callback:
                     log_callback(f"💾 Checkpoint SQL guardado: {checkpoint_dt.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -2116,10 +2491,37 @@ def ejecutar_ciclo_agente(config, log_callback=None):
                     f.write(el_ts)
                 os.replace(tmp, checkpoint_path)
                 if log_callback: log_callback(f"💾 Checkpoint Elastic guardado: {el_ts}")
-            except Exception: pass
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"⚠️ No se pudo guardar el checkpoint Elastic de [{config.get('hospital_id')}]: {e}")
         # -----------------------------------------------
 
         return {"status": "OK", "timestamp": datetime.now().strftime("%H:%M:%S")}
+
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else None
+        if status_code == 401:
+            # Ver docs/PLAN_MEJORAS_V4.5.md §2, riesgo 4: antes esto caía en
+            # el mismo bloque genérico que una caída de red, indistinguible
+            # en el log de un problema de conectividad.
+            mensaje = ("🔒 401 No autorizado: el token fue rechazado o no corresponde al "
+                       "hospital_id configurado. Revisar auth_token en la GUI, no un problema de red.")
+            if log_callback:
+                log_callback(mensaje)
+            return {
+                "status":      "Error",
+                "error":       mensaje,
+                "http_status": 401,
+                "timestamp":   datetime.now().strftime("%H:%M:%S"),
+            }
+        if log_callback:
+            log_callback(f"❌ Error HTTP {status_code} al enviar el reporte: {e}")
+        return {
+            "status":      "Error",
+            "error":       str(e),
+            "http_status": status_code,
+            "timestamp":   datetime.now().strftime("%H:%M:%S"),
+        }
 
     except Exception as e:
         return {

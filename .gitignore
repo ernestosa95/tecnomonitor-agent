@@ -18,5 +18,11 @@ secret.key
 .sql_checkpoint
 .sql_checkpoint.tmp
 
+
 # Inno Setup basura
 Output/
+
+# Checksum de rules.json generado por build.bat en cada build (ver
+# docs/PLAN_MEJORAS_V4.5.md §3.6) — no se versiona, se regenera siempre
+# contra el rules.json que se está empaquetando en ese momento.
+rules.json.sha256

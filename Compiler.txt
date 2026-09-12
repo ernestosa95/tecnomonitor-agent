@@ -1,5 +1,15 @@
-Compilar el Servicio (Invisible)
-pyinstaller --noconsole --onefile --name="TecnoMonitorConfig" --add-data "web;web" --hidden-import=wmi --hidden-import=win32com.client --hidden-import=proxmoxer --hidden-import=proxmoxer.backends.https main_gui.py
+Referencia rápida de los comandos de PyInstaller — build.bat es la fuente de
+verdad (incluye limpieza previa, checksum de rules.json y el empaquetado con
+Inno Setup); esto es solo para compilar un binario suelto a mano al debuggear.
 
-Compilar la GUI
-pyinstaller --noconsole --onefile --name="TecnoMonitorService" --hidden-import=wmi --hidden-import=win32com.client --hidden-import=proxmoxer --hidden-import=proxmoxer.backends.https headless_service.py
+NOTA (actualizado): la versión anterior de este archivo tenía el Servicio y
+la GUI cruzados, usaba --onefile para el Servicio (rompe el manejo de
+stop/shutdown del SCM — necesita --onedir, ver docs/ARQUITECTURA.md) y
+--hidden-import=proxmoxer, que ya no se usa (el módulo de hipervisor no
+depende de esa librería).
+
+Servicio (headless_service.py) — SIEMPRE --onedir, nunca --onefile:
+pyinstaller --noconfirm --noconsole --onedir --name "TecnoMonitorService" --hidden-import win32timezone --hidden-import win32serviceutil --hidden-import win32service --hidden-import win32event --hidden-import servicemanager --hidden-import win32com.client --hidden-import paramiko --add-data "rules.json;." --add-data "rules.json.sha256;." --add-data "VERSION;." headless_service.py
+
+GUI (main_gui.py):
+pyinstaller --noconfirm --windowed --onefile --uac-admin --name "TecnoMonitorConfig" --icon "logo.ico" --hidden-import win32serviceutil --hidden-import win32service --hidden-import paramiko --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms --hidden-import clr --add-data "web;web" --add-data "rules.json;." --add-data "rules.json.sha256;." --add-data "VERSION;." main_gui.py

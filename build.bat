@@ -1,11 +1,17 @@
 @echo off
 setlocal enabledelayedexpansion
 
-TITLE TecnoMonitor - SRE Automated Build System (v4.5.0)
+:: v4.6: version leida de un unico archivo (VERSION), en vez de estar
+:: hardcodeada en build.bat/TecnoMonitor.iss/agent_logic.py por separado
+:: (ver docs/PLAN_MEJORAS_V4.5.md §6). Cambiar la version de ahora en mas es
+:: editar ese archivo solo, nada mas.
+set /p AGENT_VERSION=<VERSION
+
+TITLE TecnoMonitor - SRE Automated Build System (v%AGENT_VERSION%)
 COLOR 0B
 
 echo ===================================================================
-echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v4.5.0
+echo    TECNOIMAGEN MEDICAL IT - Compilacion TecnoMonitor v%AGENT_VERSION%
 echo ===================================================================
 echo.
 
@@ -20,6 +26,14 @@ if errorlevel 1 (
     exit /b 1
 )
 echo       pywin32 presente.
+
+:: Checksum de rules.json (ver docs/PLAN_MEJORAS_V4.5.md §3.6) -- se
+:: regenera en cada build para que siempre corresponda al rules.json que se
+:: esta empaquetando en este momento, no a una version vieja del archivo.
+:: agent_logic.py lo valida al cargar las reglas (ver _rules_json_integro);
+:: si no se genera este paso, el agente simplemente omite el chequeo.
+powershell -NoProfile -Command "(Get-FileHash 'rules.json' -Algorithm SHA256).Hash" > rules.json.sha256
+echo       Checksum de rules.json generado.
 
 :: 1. Limpieza de artefactos previos
 echo.
@@ -41,6 +55,11 @@ echo       Limpieza completada con exito.
 ::    y muere al primer uso de fechas.
 echo.
 echo [2/4] Compilando TecnoMonitorService (Servicio de Windows, modo onedir)...
+:: v4.6: paramiko (monitoreo SSH de equipos Linux, ver
+:: docs/PLAN_MEJORAS_V4.5.md §9.2) depende de cryptography, que ya se usa en
+:: el proyecto (security.py) y suele empaquetar bien; se deja el
+:: --hidden-import de paramiko igual por si PyInstaller no detecta alguno de
+:: sus submodulos internos (paramiko.py3compat, etc.) en el primer build real.
 pyinstaller --noconfirm --noconsole --onedir ^
     --name "TecnoMonitorService" ^
     --hidden-import win32timezone ^
@@ -49,7 +68,10 @@ pyinstaller --noconfirm --noconsole --onedir ^
     --hidden-import win32event ^
     --hidden-import servicemanager ^
     --hidden-import win32com.client ^
+    --hidden-import paramiko ^
     --add-data "rules.json;." ^
+    --add-data "rules.json.sha256;." ^
+    --add-data "VERSION;." ^
     headless_service.py
 
 if errorlevel 1 goto ERROR_EXIT
@@ -70,11 +92,14 @@ pyinstaller --noconfirm --windowed --onefile --uac-admin ^
     --icon "logo.ico" ^
     --hidden-import win32serviceutil ^
     --hidden-import win32service ^
+    --hidden-import paramiko ^
     --hidden-import webview.platforms.edgechromium ^
     --hidden-import webview.platforms.winforms ^
     --hidden-import clr ^
     --add-data "web;web" ^
     --add-data "rules.json;." ^
+    --add-data "rules.json.sha256;." ^
+    --add-data "VERSION;." ^
     main_gui.py
 
 if errorlevel 1 goto ERROR_EXIT
@@ -95,14 +120,14 @@ if "%ISCC_PATH%"=="" (
 )
 
 echo       Usando compilador Inno Setup en: "%ISCC_PATH%"
-"%ISCC_PATH%" TecnoMonitor.iss
+"%ISCC_PATH%" /DMyAppVersion=%AGENT_VERSION% TecnoMonitor.iss
 
 if errorlevel 1 goto ERROR_EXIT
 
 echo.
 echo ===================================================================
-echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v4.5.0)
-echo   Artefacto listo en: Output\TecnoMonitor_v4.5.0_Setup.exe
+echo   COMPILACION Y EMPAQUETADO COMPLETADOS CON EXITO (v%AGENT_VERSION%)
+echo   Artefacto listo en: Output\TecnoMonitor_v%AGENT_VERSION%_Setup.exe
 echo ===================================================================
 pause
 exit /b 0

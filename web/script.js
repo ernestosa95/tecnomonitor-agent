@@ -320,6 +320,7 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('elastic_user').value          = el.user || '';
     document.getElementById('elastic_pass').value          = el.pass || '';
     document.getElementById('elastic_index_pattern').value = el.index_pattern || 'se-es-logging-*';
+    document.getElementById('elastic_use_https').checked   = !!el.use_https;
     document.getElementById('elastic_dicom_index').value   = el.dicom_index || 'ext_dicom_queues';
     document.getElementById('elastic_dicom_max_age').value = el.dicom_max_age_minutes || 15;
 
@@ -376,6 +377,7 @@ async function guardarPerfilActivo() {
         vms.push({
             nombre:    card.querySelector('.vm-nombre').value.trim(),
             type:      card.querySelector('.vm-type').value,
+            os:        card.querySelector('.vm-os').value,
             ip:        card.querySelector('.vm-ip').value.trim(),
             user:      card.querySelector('.vm-user').value.trim(),
             pass:      card.querySelector('.vm-pass').value,
@@ -450,6 +452,7 @@ async function guardarPerfilActivo() {
             user:          document.getElementById('elastic_user').value.trim(),
             pass:          document.getElementById('elastic_pass').value,
             index_pattern: document.getElementById('elastic_index_pattern').value.trim() || 'se-es-logging-*',
+            use_https:     document.getElementById('elastic_use_https').checked,
 
             enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
             dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
@@ -474,6 +477,28 @@ async function guardarPerfilActivo() {
 async function guardarIntervaloGlobal() {
     config.interval_minutes = parseInt(document.getElementById('intervalo').value) || 5;
     await persistirConfig();
+}
+
+async function cambiarCodigoAcceso() {
+    if (!confirm(
+        "¿Generar un código de acceso nuevo para esta GUI?\n\n" +
+        "El código actual dejará de funcionar de inmediato."
+    )) {
+        return;
+    }
+    try {
+        const res = await pywebview.api.cambiar_codigo_gui();
+        if (res && res.ok) {
+            alert(
+                "🔑 Nuevo código de acceso:\n\n" + res.codigo + "\n\n" +
+                "Guardalo ahora en un lugar seguro — no se va a volver a mostrar."
+            );
+        } else {
+            alert("❌ No se pudo cambiar el código.");
+        }
+    } catch (e) {
+        alert("Error de comunicación con Python: " + e);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +572,11 @@ function quitarModulo(key) {
 // ---------------------------------------------------------------------------
 // GESTIÓN DE VMs / WS / EQ (dinámico)
 // ---------------------------------------------------------------------------
+const PLACEHOLDER_SERVICIOS = {
+    windows: "Ej: MSSQLSERVER, Spooler",
+    linux:   "Ej: postgresql, logstash",
+};
+
 function agregarVM(data = null) {
     const container   = document.getElementById('vms_list');
     const id          = Date.now();
@@ -556,6 +586,11 @@ function agregarVM(data = null) {
     const selWs       = (data?.type === 'ws') ? 'selected' : '';
     const selEq       = (data?.type === 'eq') ? 'selected' : '';
     const defaultType = !data ? 'selected' : '';
+    // Sin "os" en los datos guardados (configs de antes de v4.6) = Windows,
+    // mismo comportamiento de siempre — ver docs/PLAN_MEJORAS_V4.5.md §9.2.
+    const os          = data?.os === 'linux' ? 'linux' : 'windows';
+    const selWin      = os === 'windows' ? 'selected' : '';
+    const selLinux    = os === 'linux'   ? 'selected' : '';
 
     const html = `
     <div class="card p-3 mb-3 border bg-light vm-card" id="vm_${id}">
@@ -581,13 +616,20 @@ function agregarVM(data = null) {
                 </select>
             </div>
             <div class="col-md-4">
+                <label class="form-label text-muted small mb-0 fw-bold">Sistema Operativo</label>
+                <select class="form-select vm-os" onchange="actualizarPlaceholderServicios(this)">
+                    <option value="windows" ${selWin}>Windows (WMI)</option>
+                    <option value="linux" ${selLinux}>Linux (SSH)</option>
+                </select>
+            </div>
+            <div class="col-md-4 mt-2">
                 <label class="form-label text-muted small mb-0 fw-bold">IP / Hostname</label>
                 <input type="text" class="form-control vm-ip"
                        placeholder="Ej: 192.168.1.50" value="${data?.ip || ''}">
             </div>
             <div class="col-md-4 mt-2">
                 <input type="text" class="form-control vm-user"
-                       placeholder="Admin User" value="${data?.user || ''}">
+                       placeholder="Usuario" value="${data?.user || ''}">
             </div>
             <div class="col-md-4 mt-2">
                 <input type="password" class="form-control vm-pass"
@@ -597,19 +639,24 @@ function agregarVM(data = null) {
             </div>
             <div class="col-md-4 mt-2">
                 <button class="btn btn-warning w-100 text-white shadow-sm" onclick="testVM(this)">
-                    <i class="fas fa-bolt me-1"></i> Test WMI
+                    <i class="fas fa-bolt me-1"></i> Test conexión
                 </button>
             </div>
             <div class="col-md-12 mt-2">
                 <label class="form-label text-muted small mb-0 fw-bold">Servicios a monitorear</label>
                 <input type="text" class="form-control vm-servicios"
-                       placeholder="Ej: MSSQLSERVER, Spooler"
+                       placeholder="${PLACEHOLDER_SERVICIOS[os]}"
                        value="${data?.servicios || ''}">
             </div>
         </div>
     </div>`;
 
     container.insertAdjacentHTML('beforeend', html);
+}
+
+function actualizarPlaceholderServicios(selectOs) {
+    const card = selectOs.closest('.vm-card');
+    card.querySelector('.vm-servicios').placeholder = PLACEHOLDER_SERVICIOS[selectOs.value];
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +734,7 @@ async function testIdrac() {
 
 async function testVM(btnElement) {
     const card = btnElement.closest('.vm-card');
+    const os   = card.querySelector('.vm-os').value;
     const data = {
         ip:   card.querySelector('.vm-ip').value,
         user: card.querySelector('.vm-user').value,
@@ -698,7 +746,9 @@ async function testVM(btnElement) {
     btnElement.disabled  = true;
 
     try {
-        const res = await pywebview.api.test_vm_gui(data);
+        const res = (os === 'linux')
+            ? await pywebview.api.test_vm_ssh_gui(data)
+            : await pywebview.api.test_vm_gui(data);
         btnElement.innerHTML = originalHtml;
         btnElement.disabled  = false;
 
@@ -712,7 +762,7 @@ async function testVM(btnElement) {
             const currentName = card.querySelector('.vm-nombre').value.trim();
             if (!currentName) {
                 const manualName = prompt(
-                    "⚠️ WMI falló o el equipo está apagado.\n" +
+                    `⚠️ ${os === 'linux' ? 'SSH falló' : 'WMI falló'} o el equipo está apagado.\n` +
                     "Ingresá el HOSTNAME real del equipo para evitar duplicados cuando esté disponible:"
                 );
                 if (manualName?.trim()) {
@@ -962,6 +1012,7 @@ function _leerConfigElasticDesdeUI() {
         port:        parseInt(document.getElementById('elastic_port').value) || 9200,
         user:        document.getElementById('elastic_user').value.trim(),
         pass:        document.getElementById('elastic_pass').value,
+        use_https:   document.getElementById('elastic_use_https').checked,
         dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
         ris_index_ris:   document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
         ris_index_pacs:  document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',

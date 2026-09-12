@@ -43,9 +43,16 @@ Se consulta la API Redfish del iDRAC (`verify=False`, HTTPS sin validar certific
     un flag `collection_complete` que indica si el recorrido llegó hasta el final sin cortarse
     por error.
 
-## WMI — VMs, workstations y equipos médicos Windows
+## WMI/SSH — VMs, workstations y equipos médicos (Windows o Linux)
 
-**Habilitación:** `enabled_vms` + `vms[]` · **Funciones:** `obtener_vm_data` → `_recolectar_wmi_interno`
+**Habilitación:** `enabled_vms` + `vms[]` · **Función:** `obtener_vm_data`, que despacha según
+`vms[].os` a `_recolectar_wmi_interno` (Windows, default si el campo no está) o a
+`_recolectar_ssh_interno` (Linux, desde v4.6 — ver
+[PLAN_MEJORAS_V4.5.md §9.2](./PLAN_MEJORAS_V4.5.md#92-monitoreo-de-equipos-linux-en-vms-hoy-solo-wmiwindows)).
+Ambos caminos producen el mismo `vm_obj` de salida (ver
+[ENVELOPE_API.md#virtual_layer](./ENVELOPE_API.md#virtual_layer)).
+
+### Windows (WMI)
 
 Por cada equipo de la lista, en paralelo (`ThreadPoolExecutor(max_workers=5)`):
 
@@ -68,8 +75,36 @@ Por cada equipo de la lista, en paralelo (`ThreadPoolExecutor(max_workers=5)`):
    bloquear el resto del ciclo.
 
 `state_reason` distingue explícitamente: `ok`, `port_closed`, `wmi_error` (con detalle en
-`wmi_error`), `wmi_timeout` — para que el servidor central pueda diferenciar "equipo apagado"
-de "problema de credenciales/red" de "WMI colgado".
+`collection_error`), `wmi_timeout` — para que el servidor central pueda diferenciar "equipo
+apagado" de "problema de credenciales/red" de "WMI colgado".
+
+### Linux (SSH)
+
+Mismo paralelismo y mismo timeout duro de 90 s que el camino WMI (`obtener_vm_data` es el mismo
+wrapper para ambos). Por cada equipo con `os: "linux"`:
+
+1. Chequeo previo de puerto TCP 22 — si está cerrado, `state_reason = "port_closed"`, igual que
+   WMI con el 135.
+2. Conexión SSH (`paramiko.SSHClient`, `AutoAddPolicy` — no valida host key, mismo nivel de
+   riesgo que el `verify=False` ya usado para iDRAC/Elastic/central) para correr, en su mayoría
+   en una sola ida y vuelta por dato:
+   - Hostname real (`hostname`), usado como `id` si no se configuró un nombre manual.
+   - RAM: `/proc/meminfo` (`MemTotal`/`MemAvailable`).
+   - Uptime: `/proc/uptime`.
+   - **CPU:** dos lecturas de `/proc/stat` con ~1 s de espera entre medio, delta de
+     `idle`/`total` — mismo patrón de muestreo antes/después que ya usa
+     `obtener_salud_red_pasiva` para medir tráfico de red.
+   - Disco: `df -P -B1`, excluyendo `tmpfs`/`devtmpfs`/`overlay`/`squashfs`. **No se calcula
+     latencia de disco** (`storage[].performance`) — mapear punto de montaje a dispositivo real
+     en LVM/RAID de forma confiable agrega complejidad para un dato que nadie pidió todavía.
+   - **Servicios monitoreados:** por cada unidad de `servicios` (nombres `systemd`, ej.
+     `postgresql`), `systemctl show --property=ActiveState,SubState,MainPID`; si hay `MainPID`,
+     `ps -o %cpu,rss,nlwp` para CPU/RAM/threads, y la cantidad de file descriptors abiertos
+     (`/proc/<pid>/fd`) como aproximación de `handles` (no es el mismo concepto que en Windows,
+     mismo propósito práctico: detectar una fuga de recursos).
+3. `state_reason` distingue `ok`, `port_closed`, `ssh_error` (con detalle en
+   `collection_error`), `ssh_timeout` — mismo criterio que el camino WMI, con sus propios
+   valores para no confundir un problema de SSH con uno de WMI en el mismo log.
 
 ## SQL Server (KPIs de negocio)
 

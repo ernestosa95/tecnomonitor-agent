@@ -108,6 +108,19 @@ class Api:
 
         return {"ok": False, "bloqueado": False, "segundos_restantes": 0}
 
+    @_requiere_sesion
+    def cambiar_codigo_gui(self):
+        """
+        "Cambiar código" en caliente (ver docs/PLAN_MEJORAS_V4.5.md §3.2):
+        antes la única forma de resetear el acceso era borrar admin.hash a
+        mano en el equipo. Requiere sesión ya iniciada (no es el login en
+        sí) — actualiza el hash en memoria para que el resto de esta sesión
+        siga funcionando sin reiniciar la GUI.
+        """
+        codigo_nuevo = security.regenerar_codigo_acceso()
+        self._admin_hash, _ = security.obtener_o_generar_hash_admin()
+        return {"ok": True, "codigo": codigo_nuevo}
+
     # -----------------------------------------------------------------
     # CONFIGURACIÓN — v4.6: objeto raíz {instalaciones: [...],
     # config_version: 2, interval_minutes: N}. La migración desde el
@@ -236,6 +249,10 @@ class Api:
     @_requiere_sesion
     def test_vm_gui(self, data):
         return agent_logic.test_connection_vm_wmi(data)
+
+    @_requiere_sesion
+    def test_vm_ssh_gui(self, data):
+        return agent_logic.test_connection_vm_ssh(data)
 
     @_requiere_sesion
     def test_mirth_gui(self, data):

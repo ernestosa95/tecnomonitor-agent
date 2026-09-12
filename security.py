@@ -2,16 +2,48 @@ from cryptography.fernet import Fernet
 import hashlib
 import os
 import secrets
+import subprocess
+import sys
 
 # ---------------------------------------------------------------------------
 # RUTAS A PROGRAMDATA
 # ---------------------------------------------------------------------------
+def _endurecer_permisos(path):
+    """
+    Restringe la carpeta a SYSTEM + Administradores (ver
+    docs/PLAN_MEJORAS_V4.5.md §3.5) — por defecto ProgramData hereda
+    permisos de lectura para cualquier usuario local, y ahí vive secret.key
+    (la clave que descifra todas las credenciales guardadas). Se usa el SID
+    bien conocido de Administradores (S-1-5-32-544) en vez del nombre
+    localizado ("Administradores"/"Administrators"), que varía según el
+    idioma de Windows.
+
+    Best-effort y silencioso: si icacls no está disponible o falla (ej. sin
+    privilegios suficientes), no rompe el arranque del agente — la carpeta
+    sigue funcionando con los permisos heredados de ProgramData, igual que
+    antes de este cambio. Se llama una sola vez, en el momento en que la
+    carpeta se crea por primera vez.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(
+            ["icacls", path, "/inheritance:r",
+             "/grant:r", "SYSTEM:(OI)(CI)F",
+             "/grant:r", "*S-1-5-32-544:(OI)(CI)F"],  # SID bien conocido de BUILTIN\Administradores
+            capture_output=True, timeout=10, check=False,
+        )
+    except Exception:
+        pass
+
+
 def get_app_data_path():
     r"""Retorna la ruta segura C:\ProgramData\TecnoMonitor"""
     path = os.path.join(os.environ.get('PROGRAMDATA', os.path.expanduser('~')), 'TecnoMonitor')
     if not os.path.exists(path):
         try:
             os.makedirs(path)
+            _endurecer_permisos(path)
         except Exception:
             pass
     return path
@@ -114,3 +146,21 @@ def verificar_codigo_acceso(codigo_ingresado: str, hash_guardado: str) -> bool:
     if not codigo_ingresado:
         return False
     return _hash_codigo(codigo_ingresado) == hash_guardado
+
+
+def regenerar_codigo_acceso() -> str:
+    """
+    "Cambiar código" en caliente, desde la propia GUI ya autenticada (antes
+    la única forma era borrar admin.hash a mano en el equipo). Devuelve el
+    código nuevo en texto plano — es la única vez que se puede ver, igual
+    que la primera generación.
+    """
+    codigo = generar_codigo_acceso()
+    hash_codigo = _hash_codigo(codigo)
+
+    tmp = ADMIN_HASH_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(hash_codigo)
+    os.replace(tmp, ADMIN_HASH_FILE)
+
+    return codigo

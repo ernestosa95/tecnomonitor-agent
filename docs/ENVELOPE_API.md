@@ -1,5 +1,11 @@
 # Envelope enviado al servidor central
 
+> Para pasarle al equipo de servidor como referencia de sincronización, usar
+> [CONTRATO_AGENTE.md](./CONTRATO_AGENTE.md) — está escrito para un lector externo y señala
+> explícitamente los puntos que conviene confirmar contra el contrato de ingesta del servidor.
+> Este documento es la referencia interna de implementación, con links a otros docs del repo
+> que ese equipo no tiene.
+
 Al final de cada ciclo, `ejecutar_ciclo_agente()` hace:
 
 ```
@@ -108,15 +114,20 @@ independientemente de qué otros módulos estén habilitados.
 
 ## `virtual_layer`
 
-Array de objetos, uno por equipo configurado en `vms[]` (WMI), **no** por VM del hipervisor
-(esas van dentro de `physical_layer.vms` cuando el hipervisor es VMware):
+Array de objetos, uno por equipo configurado en `vms[]`, **no** por VM del hipervisor (esas van
+dentro de `physical_layer.vms` cuando el hipervisor es VMware). Desde v4.6 cada equipo se
+recolecta por WMI (Windows, `_recolectar_wmi_interno`) o por SSH (Linux,
+`_recolectar_ssh_interno`) según `vms[].os` — ver
+[PLAN_MEJORAS_V4.5.md §9.2](./PLAN_MEJORAS_V4.5.md#92-monitoreo-de-equipos-linux-en-vms-hoy-solo-wmiwindows).
+Ambos caminos producen la misma forma de `vm_obj`:
 
 ```jsonc
 {
   "id": "PACSWKS01",
   "type": "vm" | "ws" | "eq",
+  "os": "windows" | "linux",
   "state": "Online" | "Offline",
-  "state_reason": "ok" | "port_closed" | "wmi_error" | "wmi_timeout" | "unknown",
+  "state_reason": "ok" | "port_closed" | "wmi_error" | "wmi_timeout" | "ssh_error" | "ssh_timeout" | "unknown",
   "telemetry": {
     "cpu": { "usage_percent": 8.5 },
     "ram": { "total_gb": 16.0, "used_gb": 9.2, "usage_percent": 57.5 },
@@ -132,8 +143,20 @@ Array de objetos, uno por equipo configurado en `vms[]` (WMI), **no** por VM del
         "vital_signs": { "pid": 4321, "health": "OK", "cpu_percent": 2.1, "ram_mb": 812.4, "threads": 45, "handles": 980 } }
     ]
   },
-  "wmi_error": "..." /* solo presente si state_reason == "wmi_error" */
+  "collection_error": "..." /* solo presente si state_reason es *_error (antes: wmi_error, único campo) */
 }
+```
+
+Diferencias reales del camino Linux/SSH contra el de Windows/WMI (ver §9.2 para el porqué):
+
+- `storage[].performance` **no se manda** en equipos Linux — no hay forma confiable de mapear
+  punto de montaje a dispositivo de bloque real (LVM/RAID) sin agregar bastante complejidad
+  para un dato que hoy no pide nadie.
+- `vital_signs.handles` en un equipo Linux es la cantidad de file descriptors abiertos del
+  proceso (`/proc/<pid>/fd`), no el mismo concepto que "handles" en Windows — mismo propósito
+  práctico (detectar una fuga de recursos), número no comparable 1:1 entre ambos SO.
+- `application_layer.services[].name` en Linux es el nombre de la unidad `systemd` (ej.
+  `postgresql`, `logstash`), no un nombre de servicio de Windows.
 ```
 
 ## `software_monitoring`

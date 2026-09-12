@@ -74,18 +74,27 @@ Ver [MODULOS.md](./MODULOS.md#proxmox--vmware) para qué se recolecta según el 
 
 Detalle de la extracción (checkpoint, backfill, bloques) en [MODULOS.md](./MODULOS.md#sql-server-kpis-de-negocio).
 
-## Equipos Windows — `enabled_vms` + `vms[]`
+## Equipos Windows/Linux — `enabled_vms` + `vms[]`
 
-Lista de equipos monitoreados vía WMI (VMs, workstations físicas o equipos médicos con Windows).
+Lista de equipos monitoreados vía WMI (Windows) o SSH (Linux, desde v4.6 — ver
+[PLAN_MEJORAS_V4.5.md §9.2](./PLAN_MEJORAS_V4.5.md#92-monitoreo-de-equipos-linux-en-vms-hoy-solo-wmiwindows)):
+VMs, workstations físicas o equipos médicos.
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `nombre` | string | Nombre manual opcional. Si se deja vacío, se usa el hostname real detectado por WMI (o la IP si WMI falla) |
+| `nombre` | string | Nombre manual opcional. Si se deja vacío, se usa el hostname real detectado (o la IP si falla) |
 | `type` | `"vm"` \| `"ws"` \| `"eq"` | Clasificación del equipo (VM, workstation física, equipo médico) |
-| `ip` | string | IP/hostname para WMI |
-| `user` | string | Usuario con permisos WMI remoto |
-| `pass` | string 🔒 | Contraseña |
-| `servicios` | string (CSV) o lista | Nombres de servicios de Windows a monitorear en ese equipo, ej. `"MSSQLSERVER, Spooler"` |
+| `os` | `"windows"` \| `"linux"` | Qué mecanismo de recolección usar (WMI o SSH). **Si no está presente, se asume `"windows"`** — configs guardadas antes de v4.6 no tienen este campo y siguen funcionando igual que siempre |
+| `ip` | string | IP/hostname del equipo |
+| `user` | string | Usuario con permisos WMI remoto (`os: "windows"`) o usuario SSH (`os: "linux"`) |
+| `pass` | string 🔒 | Contraseña (WMI o SSH según `os`; SSH solo soporta usuario/contraseña por ahora, no clave privada) |
+| `servicios` | string (CSV) o lista | Nombres de servicios de Windows (`os: "windows"`, ej. `"MSSQLSERVER, Spooler"`) o de unidades `systemd` (`os: "linux"`, ej. `"postgresql, logstash"`) a monitorear en ese equipo |
+
+**Diferencias de Linux/SSH contra Windows/WMI** (ver
+[ENVELOPE_API.md](./ENVELOPE_API.md#virtual_layer) para el detalle del JSON resultante): no se
+recolecta latencia de disco (`storage[].performance`) por no haber una forma confiable de
+mapear punto de montaje a dispositivo real en LVM/RAID; `vital_signs.handles` en Linux es la
+cantidad de file descriptors abiertos del proceso, no el mismo concepto que en Windows.
 
 ## Mirth Connect — `enabled_mirth` + `mirth_servers[]`
 

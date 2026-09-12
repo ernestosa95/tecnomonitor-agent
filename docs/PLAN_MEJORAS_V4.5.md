@@ -25,14 +25,14 @@ primero en la lista porque tienen impacto clínico/operativo directo y el fix es
 |---|---|---|---|---|
 | 1 | ✅ `physical_layer.storage` debería ser `physical_layer.storage_layer` | Alertas RAID (`LOGICAL_VOLUME`/discos físicos) **nunca se evalúan** hoy | Bajo | Corrección/Contrato — **resuelto en agente, ver §1.1** |
 | 2 | ✅ Sensores iDRAC (temp/fans/PSU) reportan `status: "OK"` hardcodeado | Alertas `FAN_<name>` y `PSU_<name>` **nunca pueden disparar** (siempre ven "OK") | Bajo | Corrección/Contrato — **resuelto en agente, ver §1.2** |
-| 3 | Bypass de autenticación local de la GUI (Eel expone funciones antes del login) | Cualquier proceso local puede leer credenciales descifradas | Medio | Seguridad — **pendiente, ver §3.1** |
+| 3 | ✅ Bypass de autenticación local de la GUI (funciones expuestas antes del login) | Cualquier proceso local podía leer credenciales descifradas | Medio | Seguridad — **resuelto en la migración a pywebview, ver §3.1** |
 | 4 | ✅ Contraseña de admin hardcodeada e igual en todos los hospitales | Compromiso de una instalación compromete todas | Bajo–Medio | Seguridad — **resuelto, ver §3.2** |
 | 5 | Preparar el agente para auth obligatoria en `schema_version 4.5` del lado servidor | Bloqueante para poder subir de versión de esquema sin romper ingesta | Medio | Contrato/Seguridad |
 | 6 | ✅ Un ítem de `application_metrics` mal formado tira abajo **todo el reporte** (incluye infraestructura) | Pérdida de telemetría de infraestructura por un problema de datos de negocio | Medio | Robustez/Contrato — **resuelto (mitigación local), ver §1.3** |
-| 7 | ElasticSearch por HTTP plano + `verify=False` generalizado | Credenciales e integridad de datos expuestas en la LAN | Medio | Seguridad |
-| 8 | Sin tope de memoria/tiempo en paginación de logs de Elastic | Ciclo puede colgarse o crecer sin límite tras una caída larga | Bajo–Medio | Robustez |
-| 9 | Hilos WMI que exceden el timeout de 90s quedan huérfanos | Fuga de hilos/objetos COM en entornos con equipos lentos | Medio | Robustez |
-| 10 | Permisos de `secret.key`/`monitor_config.json` sin endurecer | Cualquier usuario local con acceso a `ProgramData` puede descifrar credenciales | Bajo | Seguridad |
+| 7 | ✅ ElasticSearch por HTTP plano (opcional ahora) + `verify=False` generalizado | Credenciales e integridad de datos expuestas en la LAN | Medio | Seguridad — **HTTPS opcional resuelto, ver §3.3; `verify=False` de fondo sigue en §3.4** |
+| 8 | ✅ Sin tope de memoria/tiempo en paginación de logs de Elastic | Ciclo puede colgarse o crecer sin límite tras una caída larga | Bajo–Medio | Robustez — **resuelto, ver §4.2** |
+| 9 | ✅ Hilos WMI que exceden el timeout de 90s quedan huérfanos | Fuga de hilos/objetos COM en entornos con equipos lentos | Medio | Robustez — **telemetría resuelta (no cancelación), ver §4.3** |
+| 10 | ✅ Permisos de `secret.key`/`monitor_config.json` sin endurecer | Cualquier usuario local con acceso a `ProgramData` puede descifrar credenciales | Bajo | Seguridad — **resuelto, ver §3.5** |
 
 El resto del documento desarrolla cada punto y agrega los de menor prioridad.
 
@@ -196,6 +196,20 @@ Dos detectores del servidor asumen una cadencia de reporte que no necesariamente
   asume cada detector, y documentar (acá o en el contrato) la relación esperada entre
   `interval_minutes`/`executions_per_day` del agente y las ventanas de cada alerta.
 
+### 1.6 🟡 `collection_meta` no está descrito en el contrato de ingesta del servidor
+
+Al armar [CONTRATO_AGENTE.md](./CONTRATO_AGENTE.md) (contraparte del contrato de ingesta,
+pensado para pasarle al equipo de servidor) se confirmó que el agente manda, en la raíz de
+cada reporte, una clave `collection_meta` con el estado (`enabled`/`status`, y campos extra
+según el módulo) de cada uno de los 8 módulos — y que `10-contratoingestaagente.md` no la
+menciona en ningún lado. Como el envelope no tiene schema Pydantic estricto (`Dict[str, Any]`
+según ese mismo contrato), lo más probable es que hoy se guarde sin usarse.
+
+- **Propuesta:** confirmar con el equipo de servidor si `collection_meta` se lee o se ignora
+  hoy. Si se ignora, evaluar si conviene empezar a usarla para distinguir "módulo apagado" de
+  "módulo activo sin datos" de "módulo con error" en el dashboard — el agente ya manda esa
+  distinción hecha, no haría falta inferirla de otra forma del lado servidor.
+
 ---
 
 ## 2. ✅ HECHO — Preparación para autenticación obligatoria (`schema_version 4.5`)
@@ -240,14 +254,18 @@ GUI. La mecánica de transporte ya existe; lo que falta es el **cambio de gobier
    el panel, no reusable entre hospitales" que describe el contrato. Antes de exigir el header
    en 4.5, auditar/re-emitir tokens por hospital si hoy hay valores placeholder, compartidos, o
    vacíos en instalaciones ya desplegadas.
-4. **Manejo explícito del 401** en `ejecutar_ciclo_agente`: hoy cualquier `raise_for_status()`
-   fallido cae al mismo bloque genérico `{"status": "Error", "error": str(e)}`. Vale la pena
-   loguear el 401 de forma distinguible ("token rechazado o hospital_id no coincide — revisar
-   configuración") para que un técnico en el sitio no confunda esto con una caída de red.
-5. **Plan de rollback**: si tras bumpear a `4.5` algo falla, poder volver a `4.3` sin reinstalar
-   (ej. un flag de configuración interno, no expuesto en la GUI, para forzar el
-   `schema_version` a enviar durante la transición) da un camino de salida rápido sin depender
-   de un nuevo build.
+4. ✅ **RESUELTO — Manejo explícito del 401** en `ejecutar_ciclo_agente`: se agregó un
+   `except requests.exceptions.HTTPError` antes del genérico que, si `status_code == 401`,
+   loguea un mensaje distinguible ("token rechazado o no corresponde al hospital_id") y lo
+   devuelve como `http_status: 401` en el resultado, en vez de caer en el mismo bloque que una
+   caída de red. Cualquier otro código HTTP de error también queda con su `http_status`
+   explícito.
+5. ✅ **RESUELTO — Plan de rollback**: `SCHEMA_VERSION_OVERRIDE_FILE`
+   (`ProgramData\TecnoMonitor\schema_version_override.txt`), no expuesto en la GUI. Si existe,
+   `_schema_version_efectiva()` usa su contenido en vez de la versión normal — crear ese archivo
+   con `"4.3"` adentro fuerza el rollback sin recompilar; borrarlo vuelve al comportamiento
+   normal. `agent_version`/`schema_version` ahora también salen de una única fuente
+   (`AGENT_VERSION`/`SCHEMA_VERSION`, leídas de `/VERSION` — ver §6).
 
 Este punto no es "código a escribir" tanto como **gobierno de release**: la parte técnica ya
 está resuelta (envío del Bearer token), lo que falta es el proceso de corte coordinado.
@@ -259,12 +277,18 @@ está resuelta (envío del Bearer token), lo que falta es el proceso de corte co
 Retomado de la revisión previa ([SEGURIDAD.md](./SEGURIDAD.md)), con la autenticación
 servidor↔agente ya cubierta en la sección 2. Prioridad sugerida para v4.5:
 
-### 3.1 Bypass de autenticación local de la GUI (alto)
-El overlay de "Acceso Restringido" es solo visual; las funciones `@eel.expose` quedan
-disponibles por WebSocket desde que arranca el proceso, independientemente del login. Mitigar
-con una bandera de sesión server-side (Python) que las funciones sensibles verifiquen antes de
-ejecutar cualquier acción (`cargar_config`, `guardar_config`, `toggle_monitoreo`, etc.), seteada
-recién cuando `verificar_clave` devuelve `{"ok": True, ...}`.
+### 3.1 ✅ RESUELTO — Bypass de autenticación local de la GUI (alto)
+
+**Estado:** resuelto como parte de la migración de Eel a pywebview (v4.6, ver §9.1). Cada
+método sensible de la clase `Api` (`main_gui.py`) está decorado con `_requiere_sesion`, que
+verifica una bandera `self._autenticado` en Python antes de ejecutar cualquier acción — la
+misma clase de problema existía en pywebview (todo método público de `js_api` es invocable
+desde JS apenas carga la ventana), así que se aprovechó la reescritura completa de la API
+expuesta para cerrarlo. La bandera se pone en `True` recién cuando `verificar_clave` confirma
+el código correcto (o, la primera vez que corre el equipo, al generarse el código nuevo — no
+tiene sentido pedir loguearse con un código que se acaba de mostrar en pantalla). Verificado con
+pruebas automatizadas: un método sensible llamado antes de autenticar devuelve
+`{"ok": False, "error": "no_autenticado"}` en vez de ejecutar la acción.
 
 ### 3.2 ✅ RESUELTO — Contraseña de admin hardcodeada y compartida (alto)
 
@@ -275,29 +299,42 @@ SHA-256 (`admin.hash`), y `main_gui.py` lo muestra una única vez en el overlay
 consecutivos bloquean `verificar_clave` por 60 segundos. Recuperación de acceso: borrar
 `admin.hash` regenera un código nuevo — sin clave maestra alternativa (ver
 [SEGURIDAD.md](./SEGURIDAD.md#acceso-a-la-gui-main_guipy--webindexhtml)). No incluye una función
-de "cambiar código" en caliente ni resuelve 3.1 (bypass de Eel), que sigue pendiente.
+de "cambiar código" en caliente. El bypass de Eel/pywebview (§3.1) se resolvió aparte, en la
+migración a pywebview. ✅ La función de "cambiar código" en caliente sí se agregó después
+(`security.regenerar_codigo_acceso` + botón en la GUI, requiere sesión ya iniciada) — sigue sin
+existir una clave maestra alternativa, la única recuperación ante pérdida del código sigue
+siendo borrar `admin.hash` a mano.
 
-### 3.3 ElasticSearch por HTTP plano (medio-alto)
-Migrar las URLs de `agent_logic.py` (`recolectar_logs_elastic`, `get_dicom_routing_queues`,
-`test_connection_dicom_index`) de `http://` a `https://` cuando el clúster de Elastic lo
-soporte, o al menos loguear una advertencia explícita si `enabled_elastic` está activo y el
-host no está sirviendo HTTPS, para que quede visible en `activity.log` en vez de ser un riesgo
-silencioso.
+### 3.3 ✅ RESUELTO — ElasticSearch por HTTP plano (medio-alto)
+
+**Estado:** se agregó un checkbox "Usar HTTPS" en la tarjeta de Elastic de la GUI
+(`elastic.use_https`, default `false` — retrocompatible, cero cambio de comportamiento para
+configs existentes). `_esquema_elastic()` centraliza la decisión y se usa en los 6 puntos de
+`agent_logic.py` que arman una URL de Elastic. Se agregó `verify=False` a esos mismos requests
+(mismo criterio ya aceptado para iDRAC/central, necesario porque el caso típico es un
+certificado autofirmado del propio clúster interno del hospital, no uno de una CA pública) —
+ver §3.4, que sigue como el ítem general de fondo sobre `verify=False`.
 
 ### 3.4 `verify=False` generalizado (medio)
 Evaluar, por integración, si tiene sentido ofrecer una opción de CA propia/pinning en vez de
 desactivar la validación por completo siempre — particularmente para el envío al servidor
 central, que es el canal que transporta el envelope completo de cada hospital.
 
-### 3.5 Endurecer permisos de `ProgramData\TecnoMonitor` (bajo esfuerzo, alto valor)
-Agregar en el instalador (`TecnoMonitor.iss`) o en `security.get_app_data_path()` una ACL
-explícita que restrinja `secret.key` y `monitor_config.json` a `SYSTEM` + `Administradores`,
-en vez de heredar los permisos por defecto de `ProgramData`.
+### 3.5 ✅ RESUELTO — Endurecer permisos de `ProgramData\TecnoMonitor` (bajo esfuerzo, alto valor)
 
-### 3.6 Integridad de `rules.json` (bajo)
-Sin verificación de integridad hoy. Si se justifica por el modelo de amenaza del despliegue
-(equipos compartidos, acceso físico no controlado), evaluar una firma simple o checksum
-verificado por el servicio al cargar el archivo.
+**Estado:** `security._endurecer_permisos()` corre `icacls` (SID bien conocido de
+Administradores, `S-1-5-32-544`, en vez del nombre localizado que varía por idioma de Windows)
+la primera vez que se crea la carpeta, restringiéndola a `SYSTEM` + Administradores. Best-effort
+y silencioso: si `icacls` falla o no está disponible, la carpeta sigue funcionando con los
+permisos heredados de antes — no bloquea el arranque del agente.
+
+### 3.6 ✅ RESUELTO — Integridad de `rules.json` (bajo)
+
+**Estado:** `_rules_json_integro()` compara el SHA-256 real de `rules.json` contra
+`rules.json.sha256` (generado por `build.bat` en cada compilación, con `Get-FileHash`) antes de
+cargar las reglas. Retrocompatible: si no existe el archivo de checksum, se omite el chequeo
+(builds de antes de este cambio). Si existe y no coincide, se tratan las reglas como no
+confiables y se omiten ese ciclo (fail-safe) en vez de usarlas a ciegas, con el motivo logueado.
 
 ---
 
@@ -307,60 +344,78 @@ Retomado de la revisión previa, más el hallazgo nuevo de la sección 1.3:
 
 ### 4.1 Reporte "todo o nada" ante datos de negocio inválidos — ver §1.3 (alto, nuevo)
 
-### 4.2 Paginación de Elastic sin tope (medio)
-`recolectar_logs_elastic` pagina con `search_after` sin límite de iteraciones ni de tiempo de
-reloj. Agregar un máximo de páginas o un timeout de pared que corte y continúe en el próximo
-ciclo (el checkpoint no habría avanzado, así que no se pierde nada, solo se pospone).
+### 4.2 ✅ RESUELTO — Paginación de Elastic sin tope (medio)
 
-### 4.3 Hilos WMI huérfanos tras timeout (medio)
-`obtener_vm_data` abandona el hilo si no responde en 90s, pero no lo termina — la sesión
-COM/WMI sigue viva en segundo plano. Con equipos intermitentemente lentos esto puede acumular
-hilos/objetos COM ciclo tras ciclo. Evaluar un mecanismo de cancelación más agresivo o, como
-mínimo, telemetría interna (contador de hilos vivos) para detectar acumulación antes de que
-se vuelva un problema de memoria.
+**Estado:** `recolectar_logs_elastic` corta a los 200 páginas o 60s de pared (lo que ocurra
+primero), lo que suceda primero. El checkpoint (`newest_ts`) solo avanza hasta el último
+documento efectivamente procesado, así que cortar acá no pierde nada — lo que quede afuera del
+corte se retoma en el próximo ciclo, igual que ya pasaba con cualquier otro corte temprano.
 
-### 4.4 `except Exception: pass` sin registro alguno (bajo)
-Varios puntos (`save_checkpoint`, `reset_checkpoint`, guardado de checkpoint Elastic) silencian
-errores sin dejar ni un log de debug. Agregar al menos un `log_func` best-effort en esos catch,
+### 4.3 ✅ RESUELTO (telemetría, no cancelación) — Hilos WMI/SSH huérfanos tras timeout (medio)
+
+**Estado:** no hay forma segura de cancelar un hilo de Python a mitad de una llamada WMI/SSH
+colgada, así que se implementó la alternativa que proponía este mismo ítem: un contador global
+(`_hilos_recoleccion_vm_activos`, con lock) de hilos de recolección vivos en simultáneo. Al
+cumplirse el timeout de 90s, el log muestra cuántos hilos siguen activos (incluidos huérfanos de
+timeouts previos) y, si supera `UMBRAL_ALERTA_HILOS_HUERFANOS` (10), agrega una advertencia
+explícita de posible fuga — antes esto solo se habría notado como un problema de memoria/CPU
+genérico, sin poder rastrearlo hasta este módulo.
+
+### 4.4 ✅ RESUELTO — `except Exception: pass` sin registro alguno (bajo)
+
+**Estado:** `save_checkpoint`, `get_last_checkpoint`, `reset_checkpoint` y el guardado de
+checkpoint de Elastic en `ejecutar_ciclo_agente` ahora aceptan un `log_func` opcional y lo usan
 para poder diagnosticar por qué un checkpoint dejó de avanzar sin tener que instrumentar el
 código en el momento del incidente.
 
-### 4.5 GUI dependiente de CDN externo (bajo)
-Bootstrap/Font Awesome se cargan desde CDN; en redes hospitalarias sin salida a internet la GUI
-funciona pero se ve sin estilos. Empaquetar los assets localmente elimina esta dependencia.
+### 4.5 ✅ RESUELTO — GUI dependiente de CDN externo (bajo)
+
+**Estado:** Bootstrap 5.3.0 y Font Awesome 6.0.0 (CSS + JS + los 8 archivos de `webfonts/`) se
+descargaron una vez y quedaron empaquetados en `web/vendor/` — `index.html` los referencia por
+ruta relativa en vez de `cdn.jsdelivr.net`/`cdnjs.cloudflare.com`. Como todo `web/` ya se
+empaqueta con `--add-data "web;web"`, no hizo falta tocar `build.bat` para esto. Verificado con
+la ventana pywebview real: los modales (que dependen del JS de Bootstrap) siguen abriendo y
+cerrando igual con los assets locales.
 
 ---
 
 ## 5. Performance
 
-### 5.1 Query SQL con `OR` sobre columnas de fecha distintas (medio)
-`SQL_QUERY` en `agent_logic.py` filtra con `OR` sobre 7 columnas de fecha distintas, lo que
-típicamente impide el uso eficiente de índices por columna en tablas grandes. Si el tiempo de
-extracción se vuelve un problema medible en algún hospital con volumen alto, evaluar reescribir
-como `UNION` de sub-consultas indexadas por cada fecha, coordinando con quien administra el
-Extensa RIS/PACS de cada sitio los índices disponibles.
+### 5.1 🟡 Query SQL con `OR` sobre columnas de fecha distintas (medio) — sigue pendiente
 
-### 5.2 Concurrencia alta contra iDRAC (bajo-medio)
-`obtener_storage_fisico_v3` lanza hasta 10 requests HTTPS paralelas contra el mismo iDRAC. Los
-BMC de Dell suelen tener límites bajos de sesiones concurrentes; bajar a 3-4 *workers* es más
-conservador y reduce el riesgo de 503/timeouts intermitentes en RAID grandes.
+`SQL_QUERY` en `agent_logic.py` filtra con `OR` sobre 7 columnas de fecha distintas, lo que
+típicamente impide el uso eficiente de índices por columna en tablas grandes. **Deliberadamente
+no se tocó en esta pasada**: es la única consulta que toca datos clínicos de producción
+(RIS/PACS) directamente, y una reescritura mal probada ahí no se detecta con ningún test que se
+pueda correr sin acceso a un SQL Server real con el schema de Extensa — el propio ítem ya pedía
+coordinar con quien administra esa base antes de tocarla. Si el tiempo de extracción se vuelve
+un problema medible en algún hospital con volumen alto, ahí sí vale la pena evaluar reescribir
+como `UNION` de sub-consultas indexadas por cada fecha.
+
+### 5.2 ✅ RESUELTO — Concurrencia alta contra iDRAC (bajo-medio)
+
+**Estado:** bajado de 10 a 4 *workers* en el segundo `ThreadPoolExecutor` de
+`obtener_storage_fisico_v3` (volúmenes lógicos + discos físicos). De paso se simplificó el uso
+de `ThreadPoolExecutor` en esa función a la versión ya importada a nivel de módulo, en vez de
+`concurrent.futures.ThreadPoolExecutor` con un `import concurrent.futures` local redundante.
 
 ---
 
 ## 6. Deuda técnica / higiene de versión
 
-- **✅ HECHO (parcial) — Consolidar el versionado**: `AppVersion` (instalador), `agent_version`
-  y `schema_version` ya están alineados en `4.5.0`/`4.5` (ver
-  [BUILD.md](./BUILD.md#versionado)). Sigue pendiente la parte de "una única fuente de verdad"
-  (ej. un archivo `VERSION` leído tanto por `build.bat`/`.iss` como por `agent_logic.py`) — hoy
-  se tocaron los tres lugares a mano para este bump, y hay que recordar hacerlo de nuevo en la
-  próxima versión si no se automatiza.
-- **Retirar o actualizar `Compiler.txt`**: contiene comandos de PyInstaller desactualizados
-  (sin `--onedir`, con `--hidden-import=proxmoxer` que ya no aplica) que podrían inducir a
-  compilar un build de servicio inestable si alguien los usa por error en vez de `build.bat`.
-- **`requirements.txt` ausente**: las dependencias se infieren hoy de los imports (ver
-  [BUILD.md](./BUILD.md)). Formalizarlo reduce el riesgo de builds no reproducibles al preparar
-  el entorno de compilación de v4.5.
+- **✅ HECHO — Consolidar el versionado**: nuevo archivo `/VERSION` (contenido: `4.5.0`) es la
+  única fuente de verdad. `agent_logic.py` lo lee al importar (`AGENT_VERSION`, y
+  `SCHEMA_VERSION` derivado como major.minor); `build.bat` lo lee a una variable de entorno y se
+  lo pasa a `TecnoMonitor.iss` como macro del preprocesador (`/DMyAppVersion=...`), que a su vez
+  lo usa en `AppVersion` y en el nombre del instalador. Cambiar la versión de acá en más es
+  editar `/VERSION` una sola vez.
+- **✅ RESUELTO — Retirar o actualizar `Compiler.txt`**: reescrito para reflejar los comandos
+  reales de `build.bat` (`--onedir` para el servicio, sin `proxmoxer`, con los
+  `--hidden-import`/`--add-data` actuales de pywebview/paramiko/VERSION/rules.json.sha256),
+  dejando claro que es solo una referencia rápida y que `build.bat` es la fuente de verdad.
+- **✅ RESUELTO — `requirements.txt` ausente**: creado (incluye `pywebview`, `paramiko` y el
+  resto de las dependencias, con marcadores `sys_platform == "win32"` para las que no aplican en
+  un entorno de desarrollo no-Windows).
 
 ---
 
@@ -559,3 +614,112 @@ que alguien va a re-configurar cada hospital a mano desde la GUI: tiene que migr
 
 No es un ítem de la lista de v4.5 — con las tres decisiones tomadas, este diseño queda listo para
 pasar a implementación cuando se priorice.
+
+### 9.2 Monitoreo de equipos Linux en `vms[]` (hoy solo WMI/Windows)
+
+Hoy `vms[]` asume Windows de punta a punta: `_recolectar_wmi_interno` conecta por WMI/DCOM
+(puerto 135) y todo lo que arma (CPU, RAM, uptime, disco, servicios) sale de contadores
+específicos de Windows (`Win32_OperatingSystem`, `Win32_PerfFormattedData_PerfDisk_LogicalDisk`,
+`Win32_Service`, etc. — ver `agent_logic.py:1379-1509`). Cualquier equipo Linux del hospital
+(nodos PACS, servidores ELK/Logstash, routers DICOM en Linux) queda fuera del alcance de este
+módulo aunque conviva en la misma red que los equipos Windows ya monitoreados.
+
+**Decisión de diseño (2026-09-12):** agregar **SSH** (vía `paramiko`) como el camino
+equivalente a WMI para Linux, siguiendo el mismo patrón operativo que ya tiene `vms[]`: un
+target remoto con sus propias credenciales en la config, sin instalar nada en el equipo
+destino. Autenticación **solo usuario/contraseña por ahora** (mismos campos `user`/`pass` que
+ya existen en la tarjeta de equipo, sin agregar credenciales nuevas a la GUI) — si en el futuro
+algún hospital tiene un Linux con acceso por clave únicamente, se agrega como extensión sin
+romper este diseño.
+
+#### Config: un campo nuevo, retrocompatible
+
+Cada entrada de `vms[]` suma `"os": "windows" | "linux"`. Si no está presente (todas las
+configs ya desplegadas), se asume `"windows"` — **cero migración necesaria**, a diferencia del
+cambio de `instalaciones[]` (§9.1.1): acá el campo nuevo tiene un default seguro que preserva el
+comportamiento actual sin tocar el archivo.
+
+```json
+{ "nombre": "PACSWKS01", "type": "vm", "os": "windows", "ip": "192.168.1.50", "user": "admin", "pass": "...", "servicios": "MSSQLSERVER,Spooler" }
+{ "nombre": "elk-01",    "type": "eq", "os": "linux",   "ip": "192.168.1.60", "user": "monitor", "pass": "...", "servicios": "elasticsearch,logstash" }
+```
+
+`servicios` cambia de semántica según `os`: nombres de servicio de Windows (`Win32_Service.Name`)
+para `"windows"`, nombres de unidad `systemd` para `"linux"` — mismo campo de texto separado por
+comas, distinto vocabulario esperado.
+
+#### Recolección: `_recolectar_ssh_interno(vm_info, log_func)`, mismo `vm_obj` de salida
+
+Nueva función en `agent_logic.py`, hermana de `_recolectar_wmi_interno`, produciendo
+**exactamente la misma forma** de `vm_obj` (mismo contrato hacia `virtual_layer[]`, ver
+[CONTRATO_AGENTE.md §5](./CONTRATO_AGENTE.md)):
+
+- **Puerto:** `verificar_puerto(ip, 22)` en vez de 135 — mismo criterio de `"port_closed"` si
+  no responde.
+- **Conexión:** `paramiko.SSHClient()` con `AutoAddPolicy` (no valida host key — mismo nivel de
+  riesgo ya aceptado hoy para iDRAC/Elastic/central con `verify=False`, no es una regresión de
+  postura de seguridad nueva, ver [PLAN_MEJORAS_V4.5.md §3.4](#34-verifyfalse-generalizado-medio)).
+- **Hostname/CPU/RAM/uptime:** un solo comando remoto que junta `hostname`, `/proc/meminfo`
+  (`MemTotal`/`MemAvailable`) y `/proc/uptime` en una sola ida y vuelta SSH (menos exposición a
+  latencia de VPN que varios comandos sueltos). CPU requiere **dos** lecturas de `/proc/stat`
+  con ~1s de espera entre medio para calcular el delta de uso — mismo patrón de muestreo
+  antes/después que ya usa `obtener_salud_red_pasiva` para medir tráfico de red, no una técnica
+  nueva en el código.
+- **Disco:** `df -P -B1`, filtrando filesystems que no son discos reales (`tmpfs`, `devtmpfs`,
+  `overlay`, `squashfs`) → mapea a `mount_point`/`total_gb`/`free_gb`/`usage_percent`.
+- **Servicios:** por cada unidad de `servicios`, `systemctl show <unit> --property=ActiveState,SubState,MainPID`
+  (batcheado en un solo comando con un loop de shell para no hacer una ida y vuelta SSH por
+  servicio). Si `MainPID` > 0, `ps -o %cpu,rss,nlwp --no-headers -p <pid>` para
+  `cpu_percent`/`ram_mb`/`threads`.
+
+#### Dos campos sin equivalente limpio en Linux — decisión: omitir, no forzar una aproximación falsa
+
+- **`storage[].performance` (latencia de disco):** WMI la saca de un contador nativo
+  (`Win32_PerfFormattedData_PerfDisk_LogicalDisk`). En Linux, el dato más cercano
+  (`/proc/diskstats`, `io_ticks`) es **por dispositivo de bloque**, no por punto de montaje —
+  mapear mountpoint→device real (LVM, `device-mapper`, RAID) de forma confiable agrega bastante
+  complejidad para un dato que hoy nadie pidió explícitamente. **v1: se omite `performance` en
+  las entradas Linux** (el resto de `storage[]` sí viaja completo). Se documenta como hueco
+  conocido, no se aproxima con un valor que no significa lo mismo.
+- **`vital_signs.handles` (handles de Windows):** concepto específico de Windows, sin
+  equivalente directo en Linux. **v1: se reemplaza por la cantidad de file descriptors abiertos**
+  (`ls /proc/<pid>/fd | wc -l`) — cumple el mismo propósito práctico (detectar una fuga de
+  recursos de un proceso) aunque no sea literalmente lo mismo. Se documenta la diferencia en
+  [CONTRATO_AGENTE.md](./CONTRATO_AGENTE.md) para que quede claro que `handles` en una entrada
+  Linux no es comparable número a número contra una entrada Windows.
+
+#### Impacto en el contrato de datos (avisar al equipo de servidor)
+
+- **`virtual_layer[].wmi_error` se renombra a `collection_error`** (decisión 2026-09-12): con
+  dos mecanismos de recolección posibles, un campo llamado `wmi_error` en una entrada Linux es
+  confuso. El contrato de ingesta del servidor confirma que este campo no lo lee ninguna alerta
+  hoy (se guarda solo de referencia en `full_json_data`), así que el riesgo del rename es bajo —
+  igual hay que avisarlo explícitamente antes de desplegar, no asumir que "no lo lee nadie"
+  sin confirmarlo.
+- **`virtual_layer[].os` (nuevo campo, `"windows"|"linux"`):** se agrega al `vm_obj` de salida
+  para que el servidor pueda eventualmente distinguir el origen sin inferirlo de otra cosa (ej.
+  mostrar un ícono distinto en el dashboard, o aplicar umbrales de alerta distintos por SO más
+  adelante). No lo consume nada hoy — es agregar información, no romper nada existente (mismo
+  criterio que ya aplica al resto de `virtual_layer`, sin schema Pydantic estricto).
+
+#### GUI (`web/index.html`/`script.js`)
+
+- La tarjeta de equipo (`agregarVM`) suma un selector "Sistema Operativo" (Windows/Linux),
+  reutilizando los mismos inputs de `user`/`pass`/`servicios` que ya existen — no hay campos
+  nuevos, solo un selector que cambia qué significan los que ya están.
+  - Placeholder de "Servicios" cambia según el SO seleccionado (ej. `MSSQLSERVER, Spooler` vs.
+    `postgresql, logstash`) — mejora de usabilidad, no bloquea nada si no se hace.
+- El botón "Test WMI" pasa a ser "Test conexión", que según el SO seleccionado llama a
+  `test_vm_gui` (WMI, sin cambios) o a una nueva `test_vm_ssh_gui` → `agent_logic.test_connection_vm_ssh(data)`
+  (mismo patrón que `test_connection_vm_wmi`, pero conecta por SSH y devuelve el hostname real).
+
+#### Empaquetado
+
+- `paramiko` se agrega a `requirements.txt`. Es una librería SSH pura-Python (sin dependencias
+  nativas de Windows), así que no debería necesitar tanto cuidado como pywebview en
+  `build.bat` — a confirmar igual en el primer build real si PyInstaller detecta bien sus
+  dependencias transitivas (`cryptography`, `bcrypt`, `pynacl`) o hace falta algún
+  `--hidden-import` puntual.
+
+No es un ítem de la lista de v4.5 — queda como diseño de referencia para cuando se priorice
+implementarlo.

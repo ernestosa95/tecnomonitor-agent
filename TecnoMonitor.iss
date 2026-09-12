@@ -1,7 +1,15 @@
+; v4.6: version unica leida de /VERSION vía build.bat (/DMyAppVersion=...),
+; ver docs/PLAN_MEJORAS_V4.5.md §6. Si se compila este .iss directo desde el
+; IDE de Inno Setup (sin pasar por build.bat), cae a este default en vez de
+; fallar la compilación por una macro sin definir.
+#ifndef MyAppVersion
+  #define MyAppVersion "4.5.0"
+#endif
+
 [Setup]
 ; --- Metadatos de la Aplicación ---
 AppName=TecnoMonitor Agent
-AppVersion=4.5.0
+AppVersion={#MyAppVersion}
 AppPublisher=Medical IT (Soporte Técnico)
 AppCopyright=Copyright (C) 2026
 
@@ -11,7 +19,7 @@ DisableWelcomePage=yes
 DefaultDirName={pf}\TecnoMonitor
 DefaultGroupName=TecnoMonitor
 OutputDir=Output
-OutputBaseFilename=TecnoMonitor_v4.5.0_Setup
+OutputBaseFilename=TecnoMonitor_v{#MyAppVersion}_Setup
 
 ; --- Iconos y Permisos ---
 SetupIconFile=logo.ico
