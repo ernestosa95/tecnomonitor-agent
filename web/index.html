@@ -9,27 +9,65 @@
     <style>
         body { background-color: #f8f9fa; }
         .header-bar { background-color: #2c3e50; color: white; padding: 15px 20px; }
-        .console-box { 
-            background-color: #1e1e1e; 
-            color: #00ff00; 
-            font-family: 'Consolas', monospace; 
-            font-size: 0.85rem; 
-            height: 150px; 
-            overflow-y: auto; 
-            border-radius: 5px; 
+        .console-box {
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85rem;
+            height: 150px;
+            overflow-y: auto;
+            border-radius: 5px;
             padding: 10px;
         }
         .card-header .form-check { margin: 0; }
         .fade-field { transition: all 0.3s ease-in-out; }
+
+        /* --- HOME: grid de tarjetas de hospital --- */
+        #homeGrid, #modulosGrid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 16px;
+        }
+        .hospital-card, .modulo-card, .add-card {
+            background: white;
+            border: 1px solid #e1e4e8;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .hospital-card { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.15s ease; }
+        .hospital-card:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.1); transform: translateY(-2px); }
+        .modulo-card { cursor: pointer; transition: box-shadow 0.15s ease; }
+        .modulo-card:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        .add-card {
+            border: 2px dashed #b7c0c9;
+            box-shadow: none;
+            align-items: center;
+            justify-content: center;
+            color: #6c757d;
+            cursor: pointer;
+            min-height: 110px;
+            transition: border-color 0.15s ease, color 0.15s ease;
+        }
+        .add-card:hover { border-color: #0d6efd; color: #0d6efd; }
+        .hospital-card .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
+        .hospital-card .hospital-id { font-weight: bold; color: #2c3e50; font-size: 1.05em; word-break: break-all; }
+        .modulo-card .modulo-titulo { font-weight: 600; color: #2c3e50; font-size: 0.95em; }
+        #hospitalDetailView { display: none; }
+        .picker-item { cursor: pointer; }
+        .picker-item:hover { background-color: #f0f6ff; }
     </style>
-    <script type="text/javascript" src="/eel.js"></script>
 </head>
 <body>
 
     <!-- ============================================================
          OVERLAY DE BLOQUEO
-         La validación ocurre en Python (main_gui.py → verificar_clave /
-         estado_acceso_gui). NO hay ningún código en este archivo.
+         La validación ocurre en Python (main_gui.py → Api.verificar_clave /
+         Api.estado_acceso_gui, expuestos vía pywebview). NO hay ningún
+         código de validación en este archivo.
     ============================================================ -->
     <div id="lockOverlay" style="
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -90,11 +128,16 @@
 
     function continuarPrimeraVez() {
         cerrarOverlay();
+        // La primera vez, Python ya marca la sesión como autenticada al
+        // generar el código (ver Api.__init__ en main_gui.py) — no hay
+        // verificar_clave que llamar acá, pero igual hay que arrancar la
+        // carga de datos como si el login hubiera ocurrido.
+        if (typeof onSesionIniciada === "function") onSesionIniciada();
     }
 
     async function inicializarAcceso() {
         try {
-            const estado = await eel.estado_acceso_gui()();
+            const estado = await pywebview.api.estado_acceso_gui();
             if (estado && estado.primera_vez && estado.codigo) {
                 document.getElementById("codigoGenerado").textContent = estado.codigo;
                 document.getElementById("primeraVezView").style.display = "flex";
@@ -118,9 +161,10 @@
 
         try {
             // La validación ocurre en Python — nunca viaja ni se almacena el código aquí.
-            const res = await eel.verificar_clave(code)();
+            const res = await pywebview.api.verificar_clave(code);
             if (res && res.ok) {
                 cerrarOverlay();
+                if (typeof onSesionIniciada === "function") onSesionIniciada();
                 return;
             }
 
@@ -139,8 +183,13 @@
         }
     }
 
+    function _iniciarCuandoElBridgeEsteListo(fn) {
+        if (window.pywebview && window.pywebview.api) { fn(); return; }
+        window.addEventListener('pywebviewready', fn, { once: true });
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
-        inicializarAcceso();
+        _iniciarCuandoElBridgeEsteListo(inicializarAcceso);
         document.getElementById("adminCodeInput").addEventListener("keypress", (e) => {
             if (e.key === "Enter") { e.preventDefault(); unlockApp(); }
         });
@@ -151,9 +200,14 @@
          HEADER
     ============================================================ -->
     <div class="header-bar d-flex justify-content-between align-items-center shadow">
-        <div>
-            <h3 class="mb-0 fw-bold">TecnoMonitor Agent</h3>
-            <small class="text-white-50">Configuración Local v4.4</small>
+        <div class="d-flex align-items-center gap-3">
+            <button id="btnVolverHome" class="btn btn-sm btn-outline-light" style="display:none;" onclick="mostrarHome()">
+                <i class="fas fa-arrow-left me-1"></i>Hospitales
+            </button>
+            <div>
+                <h3 class="mb-0 fw-bold" id="tituloHeader">TecnoMonitor Agent</h3>
+                <small class="text-white-50" id="subtituloHeader">Configuración Local</small>
+            </div>
         </div>
         <div id="service_status_badge">
             <span class="badge bg-secondary">Cargando estado...</span>
@@ -161,65 +215,134 @@
     </div>
 
     <!-- ============================================================
-         CONTENIDO PRINCIPAL
+         HOME — un hospital = una tarjeta (v4.6, soporte multi-perfil)
     ============================================================ -->
-    <div class="container mt-4 pb-5">
+    <div class="container mt-4 pb-5" id="homeView">
 
-        <!-- 1. Configuración Central -->
         <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center"
-                 style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_1" aria-expanded="true">
-                <h5 class="mb-0 text-primary"><i class="fas fa-globe me-2"></i>1. Configuración Central</h5>
-                <i class="fas fa-chevron-down text-muted"></i>
+            <div class="card-body d-flex flex-wrap align-items-end gap-3">
+                <div>
+                    <label class="form-label mb-0 fw-bold">Intervalo global de monitoreo (minutos)</label>
+                    <small class="text-muted d-block mb-1">
+                        Cadencia única del agente: se aplica a todos los hospitales de esta lista.
+                    </small>
+                    <input type="number" class="form-control" id="intervalo" value="5" min="1" style="width:140px;">
+                </div>
+                <button class="btn btn-primary" onclick="guardarIntervaloGlobal()">
+                    <i class="fas fa-save me-2"></i>Guardar intervalo
+                </button>
+                <div class="ms-auto d-flex gap-2">
+                    <button class="btn btn-danger btn-lg" id="btn_monitor_toggle" onclick="toggleMonitoreo()">
+                        <i class="fas fa-stop me-2"></i>Detener Monitoreo
+                    </button>
+                </div>
             </div>
-            <!-- Se añade la clase 'show' para que inicie desplegada por defecto -->
-            <div id="collapse_1" class="collapse show">
-                <div class="card-body">
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label">ID Hospital</label>
-                            <input type="text" class="form-control" id="hosp_id" placeholder="Ej: H42">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Token de Autenticación</label>
-                            <input type="password" class="form-control" id="auth_token"
-                                   oncopy="return false" oncut="return false"
-                                   autocomplete="new-password">
-                        </div>
-                        <div class="col-md-12">
-                            <label class="form-label">URL Servidor Central</label>
-                            <div class="input-group">
-                                <input type="text" class="form-control" id="central_url"
-                                       placeholder="https://api.tecnoimagen.../v1/hospital-status">
-                                <button class="btn btn-warning text-white" onclick="testCentral()">
-                                    Test Conexión
-                                </button>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label">Intervalo de Monitoreo (Minutos)</label>
-                            <input type="number" class="form-control" id="intervalo" value="5" min="1">
+        </div>
+
+        <h5 class="text-primary mb-3"><i class="fas fa-hospital me-2"></i>Hospitales</h5>
+        <div id="homeGrid" class="mb-4"></div>
+
+        <div class="card border-primary shadow">
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-3">
+                    <label class="form-label fw-bold mb-0">Log de Actividad (En vivo, todos los hospitales)</label>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="limpiarConsola()">
+                        <i class="fas fa-eraser me-1"></i>Limpiar Consola
+                    </button>
+                </div>
+                <div class="console-box" id="log_console">
+                    Esperando inicio del servicio...
+                </div>
+            </div>
+        </div>
+
+    </div><!-- /homeView -->
+
+    <!-- ============================================================
+         DETALLE DE HOSPITAL — config general + tarjetas de módulo
+    ============================================================ -->
+    <div class="container mt-4 pb-5" id="hospitalDetailView">
+
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3">
+                <h5 class="mb-0 text-primary"><i class="fas fa-globe me-2"></i>Configuración Central</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">ID Hospital</label>
+                        <input type="text" class="form-control" id="hosp_id" placeholder="Ej: H42">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Token de Autenticación</label>
+                        <input type="password" class="form-control" id="auth_token"
+                               oncopy="return false" oncut="return false"
+                               autocomplete="new-password">
+                    </div>
+                    <div class="col-md-12">
+                        <label class="form-label">URL Servidor Central</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="central_url"
+                                   placeholder="https://api.tecnoimagen.../v1/hospital-status">
+                            <button class="btn btn-warning text-white" onclick="testCentral()">
+                                Test Conexión
+                            </button>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- 2. Hipervisor -->
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_2">
-                    <i class="fas fa-server me-2"></i>2. Hipervisor Host
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_proxmox" checked
-                           onchange="toggleCard('proxmox_body', this)">
+        <h5 class="text-primary mb-3"><i class="fas fa-microchip me-2"></i>Mediciones activas</h5>
+        <div id="modulosGrid" class="mb-4"></div>
+
+        <div class="card border-danger shadow-sm">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <button class="btn btn-primary btn-lg" onclick="guardarPerfilActivo()">
+                    <i class="fas fa-save me-2"></i>Guardar cambios del hospital
+                </button>
+                <button class="btn btn-outline-danger" onclick="eliminarHospitalActivo()">
+                    <i class="fas fa-trash me-2"></i>Eliminar este hospital
+                </button>
+            </div>
+        </div>
+
+    </div><!-- /hospitalDetailView -->
+
+    <!-- ============================================================
+         MODAL: agregar medición (picker de módulos no configurados)
+    ============================================================ -->
+    <div class="modal fade" id="modalAgregarMedicion" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-plus me-2"></i>Agregar medición</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body p-0">
+                    <div class="list-group list-group-flush" id="pickerModulosLista"></div>
                 </div>
             </div>
-            <div id="collapse_2" class="collapse">
-                <div class="card-body" id="proxmox_body">
+        </div>
+    </div>
+
+    <!-- ============================================================
+         MODALES DE MÓDULO — mismos formularios de siempre, ahora
+         dentro de un modal en vez de una sección siempre visible.
+         Su presencia en #modulosGrid (no un checkbox oculto) es lo
+         que determina si el módulo está activo para el hospital
+         abierto — ver renderModulosActivos()/guardarPerfilActivo() en script.js.
+    ============================================================ -->
+
+    <!-- Hipervisor -->
+    <div class="modal fade" id="modal_proxmox" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-server me-2"></i>Hipervisor Host</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="proxmox_body">
                     <div class="row g-3">
                         <div class="col-md-12 mb-2">
                             <label class="form-label fw-bold">Tecnología de Virtualización</label>
@@ -252,101 +375,95 @@
                         </div>
                     </div>
 
-                    <!-- Aviso pyVmomi (visible solo en modo VMware) -->
                     <div id="vmware_note" class="alert alert-info mt-3 mb-0 py-2" style="display:none; font-size:0.85em;">
                         <i class="fas fa-info-circle me-1"></i>
                         El módulo VMware requiere <strong>pyVmomi</strong>.
                         Si no está instalado: <code>pip install pyVmomi</code>.
                         El Test de conexión verificará si está disponible.
                     </div>
-
-                    <div class="d-flex justify-content-end mt-3">
-                        <button class="btn btn-warning text-white" onclick="testHypervisor()">
-                            <i class="fas fa-plug me-2"></i>Test Conexión
-                        </button>
-                    </div>
+                </div>
+                <div class="modal-footer justify-content-between">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('proxmox')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
+                    <button class="btn btn-warning text-white" onclick="testHypervisor()">
+                        <i class="fas fa-plug me-2"></i>Test Conexión
+                    </button>
                 </div>
             </div>
         </div>
+    </div>
 
-        <!-- 3. iDRAC -->
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_3">
-                    <i class="fas fa-microchip me-2"></i>3. Hardware Dell (iDRAC)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_idrac"
-                           onchange="toggleCard('idrac_body', this)">
+    <!-- iDRAC -->
+    <div class="modal fade" id="modal_idrac" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-microchip me-2"></i>Hardware Dell (iDRAC)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
-            </div>
-            <div id="collapse_3" class="collapse">
-                <div class="card-body" id="idrac_body">
+                <div class="modal-body" id="idrac_body">
                     <div class="row g-3">
-                        <div class="col-md-4">
+                        <div class="col-md-12">
                             <label class="form-label">IP iDRAC</label>
                             <input type="text" class="form-control" id="idrac_ip">
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-12">
                             <label class="form-label">Usuario</label>
                             <input type="text" class="form-control" id="idrac_user">
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-12">
                             <label class="form-label">Contraseña</label>
-                            <div class="input-group">
-                                <input type="password" class="form-control" id="idrac_pass"
-                                       oncopy="return false" oncut="return false" autocomplete="new-password">
-                                <button class="btn btn-warning text-white" onclick="testIdrac()">Test</button>
-                            </div>
+                            <input type="password" class="form-control" id="idrac_pass"
+                                   oncopy="return false" oncut="return false" autocomplete="new-password">
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- 4. Equipos Windows -->
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_4">
-                    <i class="fas fa-desktop me-2"></i>4. Equipos Windows (VM / WS)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_vms" checked
-                           onchange="toggleCard('vms_body', this)">
+                <div class="modal-footer justify-content-between">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('idrac')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
+                    <button class="btn btn-warning text-white" onclick="testIdrac()">Test</button>
                 </div>
             </div>
-            <div id="collapse_4" class="collapse">
-                <div class="card-body" id="vms_body">
+        </div>
+    </div>
+
+    <!-- Equipos Windows (VM/WS) -->
+    <div class="modal fade" id="modal_vms" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-desktop me-2"></i>Equipos Windows (VM / WS)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="vms_body">
                     <div id="vms_list"></div>
                     <button class="btn btn-secondary w-100 mt-3" onclick="agregarVM()">
                         <i class="fas fa-plus me-2"></i>Agregar Equipo (VM o WS) a Monitorear
                     </button>
                 </div>
-            </div>
-        </div>
-
-        <!-- 5. SQL Server -->
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_5">
-                    <i class="fas fa-database me-2"></i>5. Métricas de Negocio (SQL)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_sql"
-                           onchange="toggleCard('sql_body', this)">
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('vms')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
                 </div>
             </div>
-            <div id="collapse_5" class="collapse">
-                <div class="card-body" id="sql_body" style="opacity: 0.5; pointer-events: none;">
+        </div>
+    </div>
+
+    <!-- SQL -->
+    <div class="modal fade" id="modal_sql" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-database me-2"></i>Métricas de Negocio (SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="sql_body">
                     <small class="text-muted d-block mb-3">
                         <i class="fas fa-circle-info me-1"></i>
-                        Si "KPIs de RIS vía Elastic" está activo en la tarjeta de ElasticSearch,
+                        Si "KPIs de RIS vía Elastic" está activo en la medición de ElasticSearch,
                         esa configuración tiene prioridad y esta tarjeta se ignora.
                     </small>
                     <div class="row g-3">
@@ -389,47 +506,47 @@
                         </div>
                     </div>
                 </div>
-            </div>
-            
-        </div>
-
-        <!-- 6. Integraciones - Mirth -->
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_6">
-                    <i class="fas fa-network-wired me-2"></i>6. Integraciones (Mirth Connect)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_mirth"
-                           onchange="toggleCard('mirth_body', this)">
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('sql')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
                 </div>
             </div>
-            <div id="collapse_6" class="collapse">
-                <div class="card-body" id="mirth_body" style="opacity: 0.5; pointer-events: none;">
+        </div>
+    </div>
+
+    <!-- Mirth -->
+    <div class="modal fade" id="modal_mirth" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-network-wired me-2"></i>Integraciones (Mirth Connect)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="mirth_body">
                     <div id="mirth_list"></div>
                     <button class="btn btn-secondary w-100 mt-3" onclick="agregarMirth()">
                         <i class="fas fa-plus me-2"></i>Agregar Servidor Mirth
                     </button>
                 </div>
-            </div>
-        </div>
-
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_7">
-                    <i class="fas fa-lock me-2"></i>7. Certificados SSL (Web)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_ssl"
-                           onchange="toggleCard('ssl_body', this)">
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('mirth')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
                 </div>
             </div>
-            <div id="collapse_7" class="collapse">
-                <div class="card-body" id="ssl_body" style="opacity: 0.5; pointer-events: none;">
+        </div>
+    </div>
+
+    <!-- SSL -->
+    <div class="modal fade" id="modal_ssl" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-lock me-2"></i>Certificados SSL (Web)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="ssl_body">
                     <p class="text-muted small mb-3">
                         Agregue las URLs de los servidores web públicos o internos (ej: PACS, Portales) para monitorear el vencimiento de sus certificados de seguridad.
                     </p>
@@ -438,23 +555,24 @@
                         <i class="fas fa-plus me-2"></i>Añadir URL
                     </button>
                 </div>
-            </div>
-        </div>
-
-        <div class="card mb-4 shadow-sm">
-            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                <h5 class="mb-0 text-primary" style="cursor: pointer;"
-                    data-bs-toggle="collapse" data-bs-target="#collapse_8">
-                    <i class="fas fa-search-location me-2"></i>8. ElasticSearch (Logs y Autoenrute)
-                    <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
-                </h5>
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="enable_elastic"
-                           onchange="toggleCard('elastic_body', this)">
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('ssl')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
                 </div>
             </div>
-            <div id="collapse_8" class="collapse">
-                <div class="card-body" id="elastic_body" style="opacity: 0.5; pointer-events: none;">
+        </div>
+    </div>
+
+    <!-- ElasticSearch -->
+    <div class="modal fade" id="modal_elastic" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-search-location me-2"></i>ElasticSearch (Logs y Autoenrute)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="elastic_body">
                     <p class="text-muted small mb-3">
                         Configura la conexión al motor de ElasticSearch para analizar proactivamente los logs de errores de Suitestensa y leer el estado de las colas de autoenrute DICOM.
                     </p>
@@ -488,7 +606,7 @@
                             </div>
                         </div>
 
-                        <!-- Sub-ítem: Autoenrute DICOM (movido desde la tarjeta SQL) -->
+                        <!-- Sub-ítem: Autoenrute DICOM -->
                         <div class="col-md-12 mt-3">
                             <div class="p-3 border rounded bg-light">
                                 <div class="form-check form-switch d-flex align-items-center m-0">
@@ -531,7 +649,7 @@
                         </div>
                         <!-- FIN Sub-ítem -->
 
-                        <!-- Sub-ítem: KPIs de RIS vía Elastic (v4.5, alternativa a la tarjeta SQL) -->
+                        <!-- Sub-ítem: KPIs de RIS vía Elastic -->
                         <div class="col-md-12 mt-3">
                             <div class="p-3 border rounded bg-light">
                                 <div class="form-check form-switch d-flex align-items-center m-0">
@@ -542,7 +660,7 @@
                                             KPIs de RIS vía Elastic
                                         </label>
                                         <small class="text-muted d-block mt-1">
-                                            Reemplaza a la tarjeta "Métricas de Negocio (SQL)": suma buckets horarios que
+                                            Reemplaza a la medición "Métricas de Negocio (SQL)": suma buckets horarios que
                                             un pipeline de Logstash publica a Elastic, en vez de conectar directo a SQL Server.
                                             Requiere que ese pipeline ya esté corriendo en el hospital (ver docs/ELK_RIS_METRICS.md).
                                         </small>
@@ -586,31 +704,14 @@
 
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- Consola y acciones -->
-        <div class="card border-primary shadow">
-            <div class="card-body">
-                <div class="d-flex justify-content-between mb-3">
-                    <button class="btn btn-primary btn-lg" onclick="guardarConfiguracion()">
-                        <i class="fas fa-save me-2"></i>Guardar Configuración
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('elastic')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
                     </button>
-                    <button class="btn btn-danger btn-lg" id="btn_monitor_toggle" onclick="toggleMonitoreo()">
-                        <i class="fas fa-stop me-2"></i>Detener Monitoreo
-                    </button>
-                    <button class="btn btn-sm btn-outline-secondary" onclick="limpiarConsola()">
-                        <i class="fas fa-eraser me-1"></i>Limpiar Consola
-                    </button>
-                </div>
-                <label class="form-label fw-bold">Log de Actividad (En vivo)</label>
-                <div class="console-box" id="log_console">
-                    Esperando inicio del servicio...
                 </div>
             </div>
         </div>
-
-    </div><!-- /container -->
+    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="script.js"></script>

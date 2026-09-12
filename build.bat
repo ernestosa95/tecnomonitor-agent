@@ -59,11 +59,20 @@ echo       dist\TecnoMonitorService\TecnoMonitorService.exe generado correctamen
 ::    La GUI ahora habla con el SCM via pywin32, no con schtasks/taskkill.
 echo.
 echo [3/4] Compilando TecnoMonitorConfig.exe (Panel de Control GUI con UAC)...
+:: v4.6: GUI migrada de Eel a pywebview (ver docs/PLAN_MEJORAS_V4.5.md §9.1).
+:: pywebview elige en tiempo de ejecucion el backend de Windows disponible
+:: (edgechromium/WebView2 si esta el runtime instalado, si no cae a winforms);
+:: PyInstaller no detecta esa carga dinamica, de ahi los --hidden-import.
+:: TODO: confirmar en el primer build real en Windows si hace falta agregar
+:: --collect-all pywebview o empaquetar el WebView2 Loader por separado.
 pyinstaller --noconfirm --windowed --onefile --uac-admin ^
     --name "TecnoMonitorConfig" ^
     --icon "logo.ico" ^
     --hidden-import win32serviceutil ^
     --hidden-import win32service ^
+    --hidden-import webview.platforms.edgechromium ^
+    --hidden-import webview.platforms.winforms ^
+    --hidden-import clr ^
     --add-data "web;web" ^
     --add-data "rules.json;." ^
     main_gui.py

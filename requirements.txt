@@ -1,0 +1,12 @@
+# TecnoMonitor Agent — dependencias inferidas de los imports (ver docs/BUILD.md).
+# v4.6: pywebview reemplaza a eel para la GUI local (ver docs/PLAN_MEJORAS_V4.5.md §9.1 y ss).
+# pywin32 (win32serviceutil, win32service, win32event, servicemanager, win32com.client,
+# pythoncom) y wmi solo aplican en la máquina Windows del agente/servicio, no en este
+# entorno de desarrollo Linux.
+pywebview
+pywin32; sys_platform == "win32"
+wmi; sys_platform == "win32"
+requests
+psutil
+pyodbc
+cryptography

@@ -159,33 +159,198 @@ def _dicom_routing_habilitado(config):
 
 # ---------------------------------------------------------------------------
 # CHECKPOINT SQL — escritura atómica, guardado solo al confirmar envío exitoso
+#
+# v4.6: un archivo por hospital_id (soporte multi-perfil, ver
+# docs/PLAN_MEJORAS_V4.5.md §9.1). Si el archivo con sufijo todavía no existe
+# pero sí el archivo viejo sin sufijo (instalación pre-multi-perfil recién
+# migrada), se renombra una sola vez en vez de perder el checkpoint y forzar
+# una re-extracción completa del historial.
 # ---------------------------------------------------------------------------
-def get_last_checkpoint():
-    if os.path.exists(SQL_CHECKPOINT_FILE):
+def _sufijo_seguro(hospital_id):
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', str(hospital_id or "default"))
+
+
+def _ruta_checkpoint_sql(hospital_id):
+    path = os.path.join(DATA_DIR, f".sql_checkpoint_{_sufijo_seguro(hospital_id)}")
+    if not os.path.exists(path) and os.path.exists(SQL_CHECKPOINT_FILE):
         try:
-            with open(SQL_CHECKPOINT_FILE, 'r') as f:
+            os.replace(SQL_CHECKPOINT_FILE, path)
+        except Exception:
+            pass
+    return path
+
+
+def get_last_checkpoint(hospital_id):
+    path = _ruta_checkpoint_sql(hospital_id)
+    if os.path.exists(path):
+        try:
+            with open(path, 'r') as f:
                 return datetime.strptime(f.read().strip(), "%Y-%m-%d %H:%M:%S")
         except Exception:
             pass
     return None
 
-def save_checkpoint(dt):
+def save_checkpoint(hospital_id, dt):
     """Escritura atómica: escribe en .tmp y renombra. Nunca deja el archivo a medias."""
+    path = _ruta_checkpoint_sql(hospital_id)
     try:
-        tmp = SQL_CHECKPOINT_FILE + ".tmp"
+        tmp = path + ".tmp"
         with open(tmp, 'w') as f:
             f.write(dt.strftime("%Y-%m-%d %H:%M:%S"))
-        os.replace(tmp, SQL_CHECKPOINT_FILE)
+        os.replace(tmp, path)
     except Exception:
         pass
 
-def reset_checkpoint():
-    for path in [SQL_CHECKPOINT_FILE, SQL_CHECKPOINT_FILE + ".tmp"]:
-        if os.path.exists(path):
+def reset_checkpoint(hospital_id):
+    path = _ruta_checkpoint_sql(hospital_id)
+    for p in [path, path + ".tmp"]:
+        if os.path.exists(p):
             try:
-                os.remove(path)
+                os.remove(p)
             except Exception:
                 pass
+
+
+def _ruta_checkpoint_elastic(hospital_id):
+    path = os.path.join(DATA_DIR, f".elastic_checkpoint_{_sufijo_seguro(hospital_id)}")
+    if not os.path.exists(path) and os.path.exists(ELASTIC_CHECKPOINT_FILE):
+        try:
+            os.replace(ELASTIC_CHECKPOINT_FILE, path)
+        except Exception:
+            pass
+    return path
+
+
+# ---------------------------------------------------------------------------
+# CONFIGURACIÓN MULTI-PERFIL (v4.6) — ver docs/PLAN_MEJORAS_V4.5.md §9.1/§9.1.1
+#
+# monitor_config.json pasa de un objeto plano (un agente = un hospital) a
+# {"instalaciones": [...], "config_version": 2}, donde cada elemento del
+# array es un perfil completo tratado como si fuera un hospital
+# independiente (config de conexión propia, hospital_id y auth_token
+# propios). Como ya hay hospitales reales en producción con el formato
+# viejo, la migración es transparente y autocurativa: se detecta al cargar,
+# se aplica en memoria y se persiste a disco una sola vez.
+#
+# Estas funciones son el único lugar donde vive la lista de campos
+# cifrados — antes estaba duplicada en main_gui.py (_desencriptar_config /
+# guardar_config) y en headless_service.py (cargar_config_segura).
+# ---------------------------------------------------------------------------
+def migrar_config_legacy(data: dict) -> dict:
+    """Envuelve un monitor_config.json en formato plano (pre-v4.6) como el
+    único perfil de `instalaciones[]`. Si ya está migrado, no hace nada.
+
+    `interval_minutes` sube a la raíz: con múltiples perfiles la cadencia es
+    del agente (un único ciclo de servicio), no de un hospital en particular
+    (ver docs/PLAN_MEJORAS_V4.5.md §9.1, decisión de cadencia global)."""
+    if "instalaciones" in data:
+        return data
+    perfil = dict(data)
+    perfil["enabled"] = True
+    interval_minutes = perfil.pop("interval_minutes", 5)
+    return {
+        "instalaciones": [perfil],
+        "config_version": 2,
+        "interval_minutes": interval_minutes,
+    }
+
+
+def migrar_y_persistir_si_hace_falta(data: dict, config_file_path: str) -> dict:
+    """Como migrar_config_legacy, pero además persiste el resultado a disco
+    (escritura atómica .tmp + os.replace, mismo patrón que guardar_config) si
+    hubo migración — así el archivo queda en formato nuevo desde el primer
+    ciclo tras actualizar, sin depender de que alguien abra la GUI. Se llama
+    ANTES de desencriptar: la migración es solo estructural (mueve el dict
+    plano a instalaciones[0]) y no toca los valores cifrados, así que lo que
+    se persiste sigue teniendo las credenciales cifradas como siempre."""
+    if "instalaciones" in data:
+        return data
+    data = migrar_config_legacy(data)
+    try:
+        tmp = config_file_path + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        os.replace(tmp, config_file_path)
+    except Exception:
+        pass  # si no se pudo persistir, se reintenta la migración en la próxima carga
+    return data
+
+
+def _desencriptar_perfil(perfil: dict) -> dict:
+    if perfil.get("auth_token"):
+        perfil["auth_token"] = security.desencriptar(perfil["auth_token"])
+
+    if isinstance(perfil.get("proxmox"), dict) and perfil["proxmox"].get("pass"):
+        perfil["proxmox"]["pass"] = security.desencriptar(perfil["proxmox"]["pass"])
+
+    if isinstance(perfil.get("idrac"), dict) and perfil["idrac"].get("pass"):
+        perfil["idrac"]["pass"] = security.desencriptar(perfil["idrac"]["pass"])
+
+    if isinstance(perfil.get("sql"), dict) and perfil["sql"].get("pass"):
+        perfil["sql"]["pass"] = security.desencriptar(perfil["sql"]["pass"])
+
+    if isinstance(perfil.get("vms"), list):
+        for vm in perfil["vms"]:
+            if isinstance(vm, dict) and vm.get("pass"):
+                vm["pass"] = security.desencriptar(vm["pass"])
+
+    if isinstance(perfil.get("mirth_servers"), list):
+        for m in perfil["mirth_servers"]:
+            if isinstance(m, dict) and m.get("pass"):
+                m["pass"] = security.desencriptar(m["pass"])
+
+    if isinstance(perfil.get("elastic"), dict) and perfil["elastic"].get("pass"):
+        perfil["elastic"]["pass"] = security.desencriptar(perfil["elastic"]["pass"])
+
+    return perfil
+
+
+def _encriptar_perfil(perfil: dict) -> dict:
+    if perfil.get("auth_token"):
+        perfil["auth_token"] = security.encriptar(perfil["auth_token"])
+
+    if isinstance(perfil.get("proxmox"), dict) and perfil["proxmox"].get("pass"):
+        perfil["proxmox"]["pass"] = security.encriptar(perfil["proxmox"]["pass"])
+
+    if isinstance(perfil.get("idrac"), dict) and perfil["idrac"].get("pass"):
+        perfil["idrac"]["pass"] = security.encriptar(perfil["idrac"]["pass"])
+
+    if isinstance(perfil.get("sql"), dict) and perfil["sql"].get("pass"):
+        perfil["sql"]["pass"] = security.encriptar(perfil["sql"]["pass"])
+
+    if isinstance(perfil.get("vms"), list):
+        for vm in perfil["vms"]:
+            if isinstance(vm, dict) and vm.get("pass"):
+                vm["pass"] = security.encriptar(vm["pass"])
+
+    if isinstance(perfil.get("mirth_servers"), list):
+        for m in perfil["mirth_servers"]:
+            if isinstance(m, dict) and m.get("pass"):
+                m["pass"] = security.encriptar(m["pass"])
+
+    if isinstance(perfil.get("elastic"), dict) and perfil["elastic"].get("pass"):
+        perfil["elastic"]["pass"] = security.encriptar(perfil["elastic"]["pass"])
+
+    return perfil
+
+
+def desencriptar_config(data: dict) -> dict:
+    """Migra si hace falta y desencripta las credenciales de cada perfil.
+    Punto de entrada único usado por la GUI y por el servicio al cargar
+    monitor_config.json."""
+    data = migrar_config_legacy(data)
+    data["instalaciones"] = [_desencriptar_perfil(p) for p in data.get("instalaciones", [])]
+    return data
+
+
+def encriptar_config(data: dict) -> dict:
+    """Encripta las credenciales de cada perfil antes de persistir a disco.
+    Asume que `data` ya viene en formato nuevo (la GUI siempre guarda el
+    array completo, nunca formato plano)."""
+    data["instalaciones"] = [_encriptar_perfil(p) for p in data.get("instalaciones", [])]
+    data["config_version"] = 2
+    return data
+
 
 # ---------------------------------------------------------------------------
 # VALIDACIÓN DEFENSIVA DE application_metrics
@@ -278,7 +443,7 @@ def _validar_application_metrics(app_metrics: dict):
 # extraer ahora" es el mismo sin importar de dónde salgan después los
 # números — separarlo evita mantener esta lógica duplicada en dos lugares.
 # ---------------------------------------------------------------------------
-def _calcular_ventana_extraccion(executions_per_day_raw, historical_start_date, log_func=None):
+def _calcular_ventana_extraccion(hospital_id, executions_per_day_raw, historical_start_date, log_func=None):
     """
     Devuelve (target_start_time, target_end_time, interval_hours), o None si
     el bloque todavía no terminó (hay que esperar al próximo ciclo).
@@ -289,7 +454,7 @@ def _calcular_ventana_extraccion(executions_per_day_raw, historical_start_date, 
     interval_hours = 24.0 / executions_per_day
 
     ahora             = datetime.now()
-    ultimo_checkpoint = get_last_checkpoint()
+    ultimo_checkpoint = get_last_checkpoint(hospital_id)
 
     if not ultimo_checkpoint:
         if historical_start_date:
@@ -314,7 +479,7 @@ def _calcular_ventana_extraccion(executions_per_day_raw, historical_start_date, 
 # ---------------------------------------------------------------------------
 # MÉTRICAS SQL (NIVEL NEGOCIO - EJECUCIÓN LENTA)
 # ---------------------------------------------------------------------------
-def extraer_metricas_sql(sql_config, log_func=None):
+def extraer_metricas_sql(sql_config, hospital_id, log_func=None):
     if not sql_config or not sql_config.get("host"):
         return None
 
@@ -331,6 +496,7 @@ def extraer_metricas_sql(sql_config, log_func=None):
         cursor = conn.cursor()
 
         ventana = _calcular_ventana_extraccion(
+            hospital_id,
             sql_config.get("executions_per_day", 3),
             sql_config.get("historical_start_date"),
             log_func=log_func,
@@ -491,7 +657,7 @@ def _sumar_horas_users(docs):
     ]
 
 
-def extraer_metricas_ris_elastic(elastic_cfg, log_func=None):
+def extraer_metricas_ris_elastic(elastic_cfg, hospital_id, log_func=None):
     """
     Equivalente a extraer_metricas_sql pero leyendo de los índices horarios
     que publica Logstash en vez de conectar directo a SQL Server. Mismo
@@ -503,6 +669,7 @@ def extraer_metricas_ris_elastic(elastic_cfg, log_func=None):
         return None
 
     ventana = _calcular_ventana_extraccion(
+        hospital_id,
         elastic_cfg.get("ris_executions_per_day", 3),
         elastic_cfg.get("ris_historical_start_date"),
         log_func=log_func,
@@ -699,10 +866,9 @@ def test_connection_dicom_index(data):
 
     Existe porque un usuario válido para los logs puede no tener permiso sobre
     el índice de autoenrute: ese 403 es muy difícil de diagnosticar en producción.
-    Exponer en main_gui.py:
+    Expuesto como método de la clase Api en main_gui.py:
 
-        @eel.expose
-        def test_dicom_index_gui(data):
+        def test_dicom_index_gui(self, data):
             return agent_logic.test_connection_dicom_index(data)
     """
     host  = (data.get("host") or "").strip()
@@ -1576,9 +1742,9 @@ def test_connection_elastic(data):
     except Exception as e:
         return {"success": False, "msg": str(e)}
 
-def recolectar_logs_elastic(elastic_cfg, global_interval_minutes=5, log_func=None):
+def recolectar_logs_elastic(elastic_cfg, hospital_id, global_interval_minutes=5, log_func=None):
     resultado = {"events": [], "meta": {"scan_time": datetime.now().isoformat() + "Z", "new_alerts": 0}}
-    
+
     # 1. CARGAR Y PRE-COMPILAR REGLAS
     rules = []
     if os.path.exists(RULES_FILE):
@@ -1592,11 +1758,12 @@ def recolectar_logs_elastic(elastic_cfg, global_interval_minutes=5, log_func=Non
         except Exception as e:
             if log_func: log_func(f"⚠️ Error cargando rules.json: {e}")
 
-    # 2. LEER CHECKPOINT
+    # 2. LEER CHECKPOINT (por hospital_id, ver _ruta_checkpoint_elastic)
     last_ts = None
-    if os.path.exists(ELASTIC_CHECKPOINT_FILE):
+    checkpoint_path = _ruta_checkpoint_elastic(hospital_id)
+    if os.path.exists(checkpoint_path):
         try:
-            with open(ELASTIC_CHECKPOINT_FILE, 'r') as f:
+            with open(checkpoint_path, 'r') as f:
                 last_ts = f.read().strip()
         except: pass
 
@@ -1901,7 +2068,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             intervalo_global = int(config.get("interval_minutes", 5))
             
             # 2. Pasamos el intervalo_global a la función
-            elastic_data = recolectar_logs_elastic(config["elastic"], intervalo_global, log_callback)
+            elastic_data = recolectar_logs_elastic(config["elastic"], config.get("hospital_id"), intervalo_global, log_callback)
             
             # Guardamos el checkpoint en memoria para persistirlo post-envío
             if "_checkpoint_to_save" in elastic_data:
@@ -1935,7 +2102,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         if "_sql_data_payload" in config:
             checkpoint_dt = config["_sql_data_payload"].get("_checkpoint_to_save")
             if checkpoint_dt:
-                save_checkpoint(checkpoint_dt)
+                save_checkpoint(config.get("hospital_id"), checkpoint_dt)
                 if log_callback:
                     log_callback(f"💾 Checkpoint SQL guardado: {checkpoint_dt.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -1943,10 +2110,11 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         if "_elastic_checkpoint_to_save" in config:
             el_ts = config.pop("_elastic_checkpoint_to_save")
             try:
-                tmp = ELASTIC_CHECKPOINT_FILE + ".tmp"
+                checkpoint_path = _ruta_checkpoint_elastic(config.get("hospital_id"))
+                tmp = checkpoint_path + ".tmp"
                 with open(tmp, 'w') as f:
                     f.write(el_ts)
-                os.replace(tmp, ELASTIC_CHECKPOINT_FILE)
+                os.replace(tmp, checkpoint_path)
                 if log_callback: log_callback(f"💾 Checkpoint Elastic guardado: {el_ts}")
             except Exception: pass
         # -----------------------------------------------

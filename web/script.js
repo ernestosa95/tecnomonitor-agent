@@ -1,55 +1,61 @@
 // ---------------------------------------------------------------------------
 // VARIABLES GLOBALES
+//
+// v4.6: monitor_config.json pasa a {instalaciones: [...], interval_minutes,
+// config_version}. `config` guarda ese objeto raíz completo en memoria;
+// `perfilActivoIndex` cuál hospital está abierto en el detalle (null en
+// Home); `modulosActivos` qué mediciones tiene ese hospital (proxmox, idrac,
+// vms, sql, mirth, ssl, elastic) mientras se edita, antes de guardar.
 // ---------------------------------------------------------------------------
+let config            = { instalaciones: [], config_version: 2, interval_minutes: 5 };
+let perfilActivoIndex = null;
+let modulosActivos    = [];
+
 let logPosition    = 0;
 let logInterval    = null;
 let statusInterval = null;
 let isRunning      = false;
 
+const MODULOS_DISPONIBLES = {
+    proxmox: { label: 'Hipervisor Host',               icon: 'fa-server' },
+    idrac:   { label: 'Hardware Dell (iDRAC)',          icon: 'fa-microchip' },
+    vms:     { label: 'Equipos Windows (VM/WS)',        icon: 'fa-desktop' },
+    sql:     { label: 'Métricas de Negocio (SQL)',      icon: 'fa-database' },
+    mirth:   { label: 'Integraciones (Mirth Connect)',  icon: 'fa-network-wired' },
+    ssl:     { label: 'Certificados SSL (Web)',         icon: 'fa-lock' },
+    elastic: { label: 'ElasticSearch (Logs y Autoenrute)', icon: 'fa-search-location' },
+};
+
 // ---------------------------------------------------------------------------
 // INICIALIZACIÓN
+//
+// La carga real de datos arranca recién en onSesionIniciada() (llamada
+// desde el overlay de login en index.html, tras verificar_clave o tras la
+// pantalla de "primera vez"). Antes de eso, la API de Python rechaza todo
+// método sensible con {ok:false, error:"no_autenticado"} — ver
+// _requiere_sesion en main_gui.py.
 // ---------------------------------------------------------------------------
-document.addEventListener('DOMContentLoaded', () => {
-    // Esperamos 500ms para que el bridge Eel/Python esté listo
-    setTimeout(async () => {
-        try {
-            await cargarConfiguracion();
-            iniciarLogReader();
-            await checkStatus();
-            statusInterval = setInterval(checkStatus, 3000);
-        } catch (err) {
-            console.error("Error en la inicialización:", err);
-        }
-    }, 500);
-});
-
-// ---------------------------------------------------------------------------
-// UI — toggles de tarjetas y campos de hipervisor
-// ---------------------------------------------------------------------------
-function toggleCard(bodyId, checkbox) {
-    const el = document.getElementById(bodyId);
-    if (!el) return;
-    el.style.opacity       = checkbox.checked ? '1'    : '0.5';
-    el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
-
-    // El autoenrute DICOM y los KPIs de RIS vía Elastic leen desde
-    // ElasticSearch: si se apaga esa tarjeta, ambos sub-ítems quedan sin
-    // fuente de datos y se desactivan.
-    if (bodyId === 'elastic_body' && !checkbox.checked) {
-        const dicomRoutingSwitch = document.getElementById('enabled_dicom_routing');
-        if (dicomRoutingSwitch) {
-            dicomRoutingSwitch.checked = false;
-            toggleDicomRouting(dicomRoutingSwitch);
-        }
-        const risMetricsSwitch = document.getElementById('enabled_ris_metrics');
-        if (risMetricsSwitch) {
-            risMetricsSwitch.checked = false;
-            toggleRisMetrics(risMetricsSwitch);
-        }
+async function onSesionIniciada() {
+    try {
+        await cargarConfiguracion();
+        renderHome();
+        iniciarLogReader();
+        await checkStatus();
+        statusInterval = setInterval(checkStatus, 3000);
+    } catch (err) {
+        console.error("Error en la inicialización:", err);
     }
 }
 
-// Habilita/deshabilita los campos propios del sub-ítem de autoenrute.
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// UI — hipervisor y sub-toggles de ElasticSearch
+// ---------------------------------------------------------------------------
 function toggleDicomRouting(checkbox) {
     const el = document.getElementById('dicom_routing_fields');
     if (!el) return;
@@ -57,7 +63,6 @@ function toggleDicomRouting(checkbox) {
     el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
 }
 
-// Habilita/deshabilita los campos propios del sub-ítem de KPIs de RIS vía Elastic.
 function toggleRisMetrics(checkbox) {
     const el = document.getElementById('ris_metrics_fields');
     if (!el) return;
@@ -84,7 +89,8 @@ function toggleHypervisorFields() {
 }
 
 // ---------------------------------------------------------------------------
-// BLOQUEO VISUAL DEL BOTÓN DESPUÉS DE GUARDAR
+// BLOQUEO VISUAL DEL BOTÓN DESPUÉS DE GUARDAR (guardar reinicia el servicio
+// completo — sirve todos los hospitales del mismo proceso)
 // ---------------------------------------------------------------------------
 function bloquearBotonMonitoreo(segundos) {
     const btn = document.getElementById('btn_monitor_toggle');
@@ -108,139 +114,261 @@ function bloquearBotonMonitoreo(segundos) {
     }, segundos * 1000);
 }
 
+// ---------------------------------------------------------------------------
+// CARGA / GUARDADO DE CONFIGURACIÓN (objeto raíz completo)
+// ---------------------------------------------------------------------------
 async function cargarConfiguracion() {
     try {
-        const cfg = await eel.cargar_config()();
-        if (!cfg || Object.keys(cfg).length === 0 || cfg._error) {
-            console.warn("Configuración vacía o con error:", cfg?._error);
+        const cfg = await pywebview.api.cargar_config();
+        if (!cfg || cfg._error) {
+            console.warn("Configuración vacía o con error:", cfg && cfg._error);
+            config = { instalaciones: [], config_version: 2, interval_minutes: 5 };
             return;
         }
-
-        // --- 1. Configuración Central ---
-        document.getElementById('hosp_id').value     = cfg.hospital_id || '';
-        document.getElementById('auth_token').value  = cfg.auth_token || '';
-        document.getElementById('central_url').value = cfg.central_url || '';
-        document.getElementById('intervalo').value   = cfg.interval_minutes || 5;
-
-        // --- 2. Hipervisor (Proxmox / VMware) ---
-        if (cfg.proxmox) {
-            document.getElementById('hyper_type').value = cfg.proxmox.type || 'proxmox';
-            document.getElementById('px_host').value    = cfg.proxmox.host || '';
-            document.getElementById('px_node').value    = cfg.proxmox.node || '';
-            document.getElementById('px_user').value    = cfg.proxmox.user || '';
-            document.getElementById('px_pass').value    = cfg.proxmox.pass || '';
-            toggleHypervisorFields(); // Ajusta la visibilidad según el tipo
-        }
-        const chkProxmox = document.getElementById('enable_proxmox');
-        chkProxmox.checked = !!cfg.enabled_proxmox;
-        toggleCard('proxmox_body', chkProxmox);
-
-        // --- 3. Hardware Dell (iDRAC) ---
-        if (cfg.idrac) {
-            document.getElementById('idrac_ip').value   = cfg.idrac.ip || '';
-            document.getElementById('idrac_user').value = cfg.idrac.user || '';
-            document.getElementById('idrac_pass').value = cfg.idrac.pass || '';
-        }
-        const chkIdrac = document.getElementById('enable_idrac');
-        chkIdrac.checked = !!cfg.enabled_idrac;
-        toggleCard('idrac_body', chkIdrac);
-
-        // --- 4. Equipos Windows (VMs) ---
-        const chkVms = document.getElementById('enable_vms');
-        chkVms.checked = !!cfg.enabled_vms;
-        toggleCard('vms_body', chkVms);
-
-        const vmsContainer = document.getElementById('vms_list');
-        vmsContainer.innerHTML = '';
-        if (cfg.vms && cfg.vms.length > 0) {
-            cfg.vms.forEach(vm => agregarVM(vm));
-        }
-
-        // --- 5. Métricas de Negocio (SQL) ---
-        if (cfg.sql) {
-            document.getElementById('sql_host').value       = cfg.sql.host || '';
-            document.getElementById('sql_db').value         = cfg.sql.db || 'ExtensaRadio';
-            document.getElementById('sql_user').value       = cfg.sql.user || '';
-            document.getElementById('sql_pass').value       = cfg.sql.pass || '';
-            document.getElementById('sql_exec_day').value   = cfg.sql.executions_per_day || 3;
-            document.getElementById('sql_start_date').value = cfg.sql.historical_start_date || '';
-        }
-        const chkSql = document.getElementById('enable_sql');
-        chkSql.checked = !!cfg.enabled_sql;
-        toggleCard('sql_body', chkSql);
-
-        // --- 6. Integraciones (Mirth Connect) --- (NUEVO v4.1)
-        const chkMirth = document.getElementById('enable_mirth');
-        chkMirth.checked = !!cfg.enabled_mirth;
-        toggleCard('mirth_body', chkMirth);
-
-        const mirthContainer = document.getElementById('mirth_list');
-        mirthContainer.innerHTML = '';
-        if (cfg.mirth_servers && cfg.mirth_servers.length > 0) {
-            cfg.mirth_servers.forEach(m => agregarMirth(m));
-        }
-
-        // --- 7. Certificados SSL --- (NUEVO v4.2)
-        const chkSsl = document.getElementById('enable_ssl');
-        chkSsl.checked = !!cfg.enabled_ssl;
-        toggleCard('ssl_body', chkSsl);
-
-        const sslContainer = document.getElementById('ssl_list');
-        sslContainer.innerHTML = '';
-        if (cfg.ssl_urls && cfg.ssl_urls.length > 0) {
-            cfg.ssl_urls.forEach(urlObj => agregarSSL(urlObj));
-        }
-
-        // --- 8. ElasticSearch: Logs + Autoenrute --- (v4.4)
-        if (cfg.elastic) {
-            document.getElementById('elastic_host').value          = cfg.elastic.host || '';
-            document.getElementById('elastic_port').value          = cfg.elastic.port || 9200;
-            document.getElementById('elastic_user').value          = cfg.elastic.user || '';
-            document.getElementById('elastic_pass').value          = cfg.elastic.pass || '';
-            document.getElementById('elastic_index_pattern').value = cfg.elastic.index_pattern || 'se-es-logging-*';
-            document.getElementById('elastic_dicom_index').value   = cfg.elastic.dicom_index || 'ext_dicom_queues';
-            document.getElementById('elastic_dicom_max_age').value = cfg.elastic.dicom_max_age_minutes || 15;
-
-            // --- NUEVO v4.5: KPIs de RIS vía Elastic ---
-            document.getElementById('elastic_ris_exec_day').value    = cfg.elastic.ris_executions_per_day || 3;
-            document.getElementById('elastic_ris_start_date').value  = cfg.elastic.ris_historical_start_date || '';
-            document.getElementById('elastic_ris_index_ris').value   = cfg.elastic.ris_index_ris   || 'ext_ris_metrics_hourly';
-            document.getElementById('elastic_ris_index_pacs').value  = cfg.elastic.ris_index_pacs  || 'ext_pacs_metrics_hourly';
-            document.getElementById('elastic_ris_index_users').value = cfg.elastic.ris_index_users || 'ext_users_metrics_hourly';
-        }
-        const chkElastic = document.getElementById('enable_elastic');
-        chkElastic.checked = !!cfg.enabled_elastic;
-
-        // COMPATIBILIDAD: hasta v4.3 el flag vivía dentro de cfg.sql.
-        // Sin este fallback, los agentes ya desplegados aparecerían con el
-        // switch apagado y dejarían de reportar en silencio al primer guardado.
-        const dicomRoutingActivo =
-            (cfg.elastic && typeof cfg.elastic.enabled_dicom_routing === 'boolean')
-                ? cfg.elastic.enabled_dicom_routing
-                : !!(cfg.sql && cfg.sql.enabled_dicom_routing);
-
-        const chkDicom = document.getElementById('enabled_dicom_routing');
-        chkDicom.checked = dicomRoutingActivo;
-
-        const chkRisMetrics = document.getElementById('enabled_ris_metrics');
-        chkRisMetrics.checked = !!(cfg.elastic && cfg.elastic.enabled_ris_metrics);
-
-        // toggleCard debe correr DESPUÉS de fijar los sub-switches: si la
-        // tarjeta Elastic está apagada, se encarga de bajarlos por coherencia.
-        toggleCard('elastic_body', chkElastic);
-        toggleDicomRouting(chkDicom);
-        toggleRisMetrics(chkRisMetrics);
-
+        config = cfg;
+        if (!Array.isArray(config.instalaciones)) config.instalaciones = [];
+        if (!config.interval_minutes) config.interval_minutes = 5;
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
+        config = { instalaciones: [], config_version: 2, interval_minutes: 5 };
     }
 }
 
-async function guardarConfiguracion() {
-    const btn = document.querySelector('button[onclick="guardarConfiguracion()"]');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
-    btn.disabled = true;
+async function persistirConfig(opts = {}) {
+    try {
+        const res = await pywebview.api.guardar_config(config);
+        if (res && res.success) {
+            bloquearBotonMonitoreo(30);
+            if (!opts.silencioso) {
+                alert("✅ Configuración guardada correctamente.\nEl servicio se está reiniciando para aplicar los cambios.");
+            }
+            if (res.warning) alert("⚠️ " + res.msg);
+        } else {
+            alert("❌ Error al guardar: " + (res && res.msg));
+        }
+        return res;
+    } catch (e) {
+        alert("Error de comunicación con el motor Python: " + e);
+        return { success: false, msg: String(e) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HOME — grid de tarjetas de hospital
+// ---------------------------------------------------------------------------
+function mostrarHome() {
+    perfilActivoIndex = null;
+    document.getElementById('hospitalDetailView').style.display = 'none';
+    document.getElementById('homeView').style.display = 'block';
+    document.getElementById('btnVolverHome').style.display = 'none';
+    document.getElementById('tituloHeader').textContent = 'TecnoMonitor Agent';
+    document.getElementById('subtituloHeader').textContent = 'Configuración Local';
+    renderHome();
+}
+
+function mostrarDetalle() {
+    document.getElementById('homeView').style.display = 'none';
+    document.getElementById('hospitalDetailView').style.display = 'block';
+    document.getElementById('btnVolverHome').style.display = 'inline-block';
+}
+
+function determinarModulosActivos(perfil) {
+    const activos = [];
+    if (perfil.enabled_proxmox) activos.push('proxmox');
+    if (perfil.enabled_idrac)   activos.push('idrac');
+    if (perfil.enabled_vms)     activos.push('vms');
+    if (perfil.enabled_sql)     activos.push('sql');
+    if (perfil.enabled_mirth)   activos.push('mirth');
+    if (perfil.enabled_ssl)     activos.push('ssl');
+    if (perfil.enabled_elastic) activos.push('elastic');
+    return activos;
+}
+
+function renderHome() {
+    const grid = document.getElementById('homeGrid');
+    grid.innerHTML = '';
+    document.getElementById('intervalo').value = config.interval_minutes || 5;
+
+    (config.instalaciones || []).forEach((perfil, i) => {
+        const activo = perfil.enabled !== false;
+        const div = document.createElement('div');
+        div.className = 'hospital-card';
+        div.innerHTML = `
+            <div class="card-top">
+                <span class="hospital-id"><i class="fas fa-hospital me-1"></i>${escapeHtml(perfil.hospital_id || '(sin nombre)')}</span>
+                <span class="badge ${activo ? 'bg-success' : 'bg-secondary'}">${activo ? 'Activo' : 'Inactivo'}</span>
+            </div>
+            <small class="text-muted">${determinarModulosActivos(perfil).length} mediciones configuradas</small>
+            <div class="d-flex justify-content-between align-items-center mt-2">
+                <div class="form-check form-switch m-0"></div>
+                <button class="btn btn-sm btn-outline-danger btn-eliminar-hospital" title="Eliminar hospital">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>`;
+
+        const switchWrap = div.querySelector('.form-check.form-switch');
+        const switchInput = document.createElement('input');
+        switchInput.className = 'form-check-input';
+        switchInput.type = 'checkbox';
+        switchInput.checked = activo;
+        switchInput.addEventListener('click', (e) => e.stopPropagation());
+        switchInput.addEventListener('change', (e) => toggleHospitalActivo(i, e.target.checked));
+        switchWrap.appendChild(switchInput);
+
+        div.querySelector('.btn-eliminar-hospital').addEventListener('click', (e) => {
+            e.stopPropagation();
+            eliminarHospital(i);
+        });
+
+        div.addEventListener('click', () => abrirHospital(i));
+        grid.appendChild(div);
+    });
+
+    const addCard = document.createElement('div');
+    addCard.className = 'add-card';
+    addCard.innerHTML = '<i class="fas fa-plus fa-2x mb-2"></i><div>Agregar hospital</div>';
+    addCard.addEventListener('click', agregarHospital);
+    grid.appendChild(addCard);
+}
+
+async function toggleHospitalActivo(i, checked) {
+    config.instalaciones[i].enabled = checked;
+    await persistirConfig({ silencioso: true });
+    renderHome();
+}
+
+async function eliminarHospital(i) {
+    const perfil = config.instalaciones[i];
+    if (!confirm(`¿Eliminar el hospital "${perfil.hospital_id || '(sin nombre)'}"?\n\nEsta acción no se puede deshacer.`)) return;
+    config.instalaciones.splice(i, 1);
+    await persistirConfig({ silencioso: true });
+    if (perfilActivoIndex === i) {
+        mostrarHome();
+    } else {
+        renderHome();
+    }
+}
+
+async function eliminarHospitalActivo() {
+    if (perfilActivoIndex === null) return;
+    await eliminarHospital(perfilActivoIndex);
+}
+
+function agregarHospital() {
+    const id = prompt("ID del nuevo hospital (ej: H42):");
+    if (!id || !id.trim()) return;
+
+    const nuevo = {
+        hospital_id: id.trim(),
+        auth_token: '',
+        central_url: (config.instalaciones[0] && config.instalaciones[0].central_url) || '',
+        enabled: true,
+    };
+    config.instalaciones.push(nuevo);
+    persistirConfig({ silencioso: true }).then(() => {
+        abrirHospital(config.instalaciones.length - 1);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// DETALLE DE HOSPITAL — config general + tarjetas de módulo
+// ---------------------------------------------------------------------------
+function poblarFormularioModulos(perfil) {
+    // Hipervisor
+    const px = perfil.proxmox || {};
+    document.getElementById('hyper_type').value = px.type || 'proxmox';
+    document.getElementById('px_host').value    = px.host || '';
+    document.getElementById('px_node').value    = px.node || '';
+    document.getElementById('px_user').value    = px.user || '';
+    document.getElementById('px_pass').value    = px.pass || '';
+    toggleHypervisorFields();
+
+    // iDRAC
+    const idrac = perfil.idrac || {};
+    document.getElementById('idrac_ip').value   = idrac.ip || '';
+    document.getElementById('idrac_user').value = idrac.user || '';
+    document.getElementById('idrac_pass').value = idrac.pass || '';
+
+    // Equipos Windows (VMs)
+    const vmsContainer = document.getElementById('vms_list');
+    vmsContainer.innerHTML = '';
+    (perfil.vms || []).forEach(vm => agregarVM(vm));
+
+    // SQL
+    const sql = perfil.sql || {};
+    document.getElementById('sql_host').value       = sql.host || '';
+    document.getElementById('sql_db').value         = sql.db || 'ExtensaRadio';
+    document.getElementById('sql_user').value       = sql.user || '';
+    document.getElementById('sql_pass').value       = sql.pass || '';
+    document.getElementById('sql_exec_day').value   = sql.executions_per_day || 3;
+    document.getElementById('sql_start_date').value = sql.historical_start_date || '';
+
+    // Mirth
+    const mirthContainer = document.getElementById('mirth_list');
+    mirthContainer.innerHTML = '';
+    (perfil.mirth_servers || []).forEach(m => agregarMirth(m));
+
+    // SSL
+    const sslContainer = document.getElementById('ssl_list');
+    sslContainer.innerHTML = '';
+    (perfil.ssl_urls || []).forEach(u => agregarSSL(u));
+
+    // ElasticSearch (logs + autoenrute + KPIs de RIS)
+    const el = perfil.elastic || {};
+    document.getElementById('elastic_host').value          = el.host || '';
+    document.getElementById('elastic_port').value          = el.port || 9200;
+    document.getElementById('elastic_user').value          = el.user || '';
+    document.getElementById('elastic_pass').value          = el.pass || '';
+    document.getElementById('elastic_index_pattern').value = el.index_pattern || 'se-es-logging-*';
+    document.getElementById('elastic_dicom_index').value   = el.dicom_index || 'ext_dicom_queues';
+    document.getElementById('elastic_dicom_max_age').value = el.dicom_max_age_minutes || 15;
+
+    document.getElementById('elastic_ris_exec_day').value    = el.ris_executions_per_day || 3;
+    document.getElementById('elastic_ris_start_date').value  = el.ris_historical_start_date || '';
+    document.getElementById('elastic_ris_index_ris').value   = el.ris_index_ris   || 'ext_ris_metrics_hourly';
+    document.getElementById('elastic_ris_index_pacs').value  = el.ris_index_pacs  || 'ext_pacs_metrics_hourly';
+    document.getElementById('elastic_ris_index_users').value = el.ris_index_users || 'ext_users_metrics_hourly';
+
+    // COMPATIBILIDAD: hasta v4.3 el flag de autoenrute vivía dentro de sql.
+    const dicomRoutingActivo =
+        typeof el.enabled_dicom_routing === 'boolean'
+            ? el.enabled_dicom_routing
+            : !!(sql && sql.enabled_dicom_routing);
+
+    const chkDicom = document.getElementById('enabled_dicom_routing');
+    chkDicom.checked = dicomRoutingActivo;
+    toggleDicomRouting(chkDicom);
+
+    const chkRisMetrics = document.getElementById('enabled_ris_metrics');
+    chkRisMetrics.checked = !!el.enabled_ris_metrics;
+    toggleRisMetrics(chkRisMetrics);
+}
+
+function abrirHospital(index) {
+    perfilActivoIndex = index;
+    const perfil = config.instalaciones[index];
+
+    document.getElementById('hosp_id').value     = perfil.hospital_id || '';
+    document.getElementById('auth_token').value  = perfil.auth_token || '';
+    document.getElementById('central_url').value = perfil.central_url || '';
+
+    poblarFormularioModulos(perfil);
+    modulosActivos = determinarModulosActivos(perfil);
+
+    document.getElementById('tituloHeader').textContent = perfil.hospital_id || '(sin nombre)';
+    document.getElementById('subtituloHeader').textContent =
+        perfil.enabled === false ? 'Hospital desactivado' : 'Configuración del hospital';
+
+    renderModulosActivos();
+    mostrarDetalle();
+}
+
+async function guardarPerfilActivo() {
+    if (perfilActivoIndex === null) return;
+
+    const btn = document.querySelector('button[onclick="guardarPerfilActivo()"]');
+    const originalText = btn ? btn.innerHTML : null;
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...'; btn.disabled = true; }
 
     // --- Recolectar lista de VMs ---
     const vms = [];
@@ -255,7 +383,7 @@ async function guardarConfiguracion() {
         });
     });
 
-    // --- Recolectar lista de Mirth Connect --- (NUEVO v4.1)
+    // --- Recolectar lista de Mirth Connect ---
     const mirth_servers = [];
     document.querySelectorAll('.mirth-card').forEach(card => {
         mirth_servers.push({
@@ -266,22 +394,21 @@ async function guardarConfiguracion() {
         });
     });
 
-    // --- Recolectar lista de SSL --- (NUEVO v4.2)
+    // --- Recolectar lista de SSL ---
     const ssl_urls = [];
     document.querySelectorAll('.ssl-card').forEach(card => {
-        ssl_urls.push({
-            url: card.querySelector('.ssl-url').value.trim()
-        });
+        ssl_urls.push({ url: card.querySelector('.ssl-url').value.trim() });
     });
 
-    // --- Construir objeto de configuración Maestro ---
-    const config = {
-        hospital_id:      document.getElementById('hosp_id').value.trim(),
-        auth_token:       document.getElementById('auth_token').value,
-        central_url:      document.getElementById('central_url').value.trim(),
-        interval_minutes: parseInt(document.getElementById('intervalo').value) || 5,
+    const perfilPrevio = config.instalaciones[perfilActivoIndex] || {};
 
-        enabled_proxmox: document.getElementById('enable_proxmox').checked,
+    const perfil = {
+        hospital_id:  document.getElementById('hosp_id').value.trim(),
+        auth_token:   document.getElementById('auth_token').value,
+        central_url:  document.getElementById('central_url').value.trim(),
+        enabled:      perfilPrevio.enabled !== false,
+
+        enabled_proxmox: modulosActivos.includes('proxmox'),
         proxmox: {
             type: document.getElementById('hyper_type').value,
             host: document.getElementById('px_host').value.trim(),
@@ -290,14 +417,14 @@ async function guardarConfiguracion() {
             pass: document.getElementById('px_pass').value,
         },
 
-        enabled_idrac: document.getElementById('enable_idrac').checked,
+        enabled_idrac: modulosActivos.includes('idrac'),
         idrac: {
             ip:   document.getElementById('idrac_ip').value.trim(),
             user: document.getElementById('idrac_user').value.trim(),
             pass: document.getElementById('idrac_pass').value,
         },
 
-        enabled_sql: document.getElementById('enable_sql').checked,
+        enabled_sql: modulosActivos.includes('sql'),
         sql: {
             host:                  document.getElementById('sql_host').value.trim(),
             db:                    document.getElementById('sql_db').value.trim(),
@@ -307,17 +434,16 @@ async function guardarConfiguracion() {
             historical_start_date: document.getElementById('sql_start_date').value,
         },
 
-        enabled_vms: document.getElementById('enable_vms').checked,
+        enabled_vms: modulosActivos.includes('vms'),
         vms: vms,
 
-        enabled_mirth: document.getElementById('enable_mirth').checked,
+        enabled_mirth: modulosActivos.includes('mirth'),
         mirth_servers: mirth_servers,
 
-        enabled_ssl: document.getElementById('enable_ssl').checked,
+        enabled_ssl: modulosActivos.includes('ssl'),
         ssl_urls: ssl_urls,
 
-        // --- v4.4: ElasticSearch (Logs + Autoenrute DICOM) ---
-        enabled_elastic: document.getElementById('enable_elastic').checked,
+        enabled_elastic: modulosActivos.includes('elastic'),
         elastic: {
             host:          document.getElementById('elastic_host').value.trim(),
             port:          parseInt(document.getElementById('elastic_port').value) || 9200,
@@ -325,43 +451,97 @@ async function guardarConfiguracion() {
             pass:          document.getElementById('elastic_pass').value,
             index_pattern: document.getElementById('elastic_index_pattern').value.trim() || 'se-es-logging-*',
 
-            // El flag de autoenrute vive acá desde v4.4 (antes estaba en sql).
             enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
             dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
             dicom_max_age_minutes:  parseInt(document.getElementById('elastic_dicom_max_age').value) || 15,
 
-            // --- NUEVO v4.5: KPIs de RIS vía Elastic (alternativa a la tarjeta SQL) ---
-            enabled_ris_metrics:     document.getElementById('enabled_ris_metrics').checked,
-            ris_executions_per_day:  parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
+            enabled_ris_metrics:      document.getElementById('enabled_ris_metrics').checked,
+            ris_executions_per_day:   parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
             ris_historical_start_date: document.getElementById('elastic_ris_start_date').value,
-            ris_index_ris:           document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
-            ris_index_pacs:          document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
-            ris_index_users:         document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
-        }
+            ris_index_ris:            document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
+            ris_index_pacs:           document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
+            ris_index_users:          document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
+        },
     };
 
-    try {
-        const res = await eel.guardar_config(config)();
-        
-        // Simular tiempo de guardado para feedback visual
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            
-            if (res.success) {
-                // Bloqueamos el botón de monitoreo 30s mientras el servicio reinicia
-                bloquearBotonMonitoreo(30); 
-                alert("✅ Configuración guardada correctamente.\nEl servicio se está reiniciando para aplicar los cambios.");
-            } else {
-                alert("❌ Error al guardar: " + res.msg);
-            }
-        }, 1000);
+    config.instalaciones[perfilActivoIndex] = perfil;
 
-    } catch (e) {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-        alert("Error de comunicación con el motor Python: " + e);
+    await persistirConfig();
+
+    if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+}
+
+async function guardarIntervaloGlobal() {
+    config.interval_minutes = parseInt(document.getElementById('intervalo').value) || 5;
+    await persistirConfig();
+}
+
+// ---------------------------------------------------------------------------
+// TARJETAS DE MÓDULO (mediciones activas del hospital abierto)
+// ---------------------------------------------------------------------------
+function renderModulosActivos() {
+    const grid = document.getElementById('modulosGrid');
+    grid.innerHTML = '';
+
+    modulosActivos.forEach(key => {
+        const info = MODULOS_DISPONIBLES[key];
+        if (!info) return;
+        const div = document.createElement('div');
+        div.className = 'modulo-card';
+        div.innerHTML = `<i class="fas ${info.icon} fa-lg text-primary mb-1"></i><span class="modulo-titulo">${info.label}</span>`;
+        div.addEventListener('click', () => abrirModalModulo(key));
+        grid.appendChild(div);
+    });
+
+    const addCard = document.createElement('div');
+    addCard.className = 'add-card';
+    addCard.innerHTML = '<i class="fas fa-plus fa-2x mb-2"></i><div>Agregar medición</div>';
+    addCard.addEventListener('click', abrirPickerModulos);
+    grid.appendChild(addCard);
+}
+
+function abrirModalModulo(key) {
+    const modalEl = document.getElementById('modal_' + key);
+    if (!modalEl) return;
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+}
+
+function abrirPickerModulos() {
+    const lista = document.getElementById('pickerModulosLista');
+    lista.innerHTML = '';
+    const disponibles = Object.keys(MODULOS_DISPONIBLES).filter(k => !modulosActivos.includes(k));
+
+    if (disponibles.length === 0) {
+        lista.innerHTML = '<div class="list-group-item text-muted">Ya agregaste todas las mediciones disponibles.</div>';
+    } else {
+        disponibles.forEach(key => {
+            const info = MODULOS_DISPONIBLES[key];
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'list-group-item list-group-item-action picker-item';
+            item.innerHTML = `<i class="fas ${info.icon} me-2 text-primary"></i>${info.label}`;
+            item.addEventListener('click', () => agregarModulo(key));
+            lista.appendChild(item);
+        });
     }
+
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('modalAgregarMedicion')).show();
+}
+
+function agregarModulo(key) {
+    if (!modulosActivos.includes(key)) modulosActivos.push(key);
+    bootstrap.Modal.getInstance(document.getElementById('modalAgregarMedicion'))?.hide();
+    renderModulosActivos();
+    // Abrimos directo el formulario recién agregado para completarlo.
+    setTimeout(() => abrirModalModulo(key), 300);
+}
+
+function quitarModulo(key) {
+    const info = MODULOS_DISPONIBLES[key];
+    if (!confirm(`¿Quitar la medición "${info.label}"?\n\nLos datos ingresados en este formulario se perderán si no guardaste antes.`)) return;
+    modulosActivos = modulosActivos.filter(k => k !== key);
+    bootstrap.Modal.getInstance(document.getElementById('modal_' + key))?.hide();
+    renderModulosActivos();
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +621,7 @@ async function testCentral() {
     if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Probando...'; btn.disabled = true; }
 
     const url = document.getElementById('central_url').value;
-    const res = await eel.probar_conexion_central(url)();
+    const res = await pywebview.api.probar_conexion_central(url);
 
     if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
     alert(res.success
@@ -464,15 +644,14 @@ async function testHypervisor() {
 
     try {
         const result = (type === 'vmware')
-            ? await eel.test_vmware_gui(data)()
-            : await eel.test_proxmox_gui(data)();
+            ? await pywebview.api.test_vmware_gui(data)
+            : await pywebview.api.test_proxmox_gui(data);
 
         if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
 
         if (result.success) {
             alert(`✅ ÉXITO:\n${result.msg}`);
         } else {
-            // Mensaje más descriptivo para VMware
             if (type === 'vmware' && result.msg.includes('pyVmomi')) {
                 alert(`❌ Módulo faltante:\n${result.msg}\n\nEjecutar en el entorno del agente:\n  pip install pyVmomi`);
             } else {
@@ -497,7 +676,7 @@ async function testIdrac() {
     };
 
     try {
-        const res = await eel.test_idrac_gui(data)();
+        const res = await pywebview.api.test_idrac_gui(data);
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
     } catch (e) {
@@ -519,7 +698,7 @@ async function testVM(btnElement) {
     btnElement.disabled  = true;
 
     try {
-        const res = await eel.test_vm_gui(data)();
+        const res = await pywebview.api.test_vm_gui(data);
         btnElement.innerHTML = originalHtml;
         btnElement.disabled  = false;
 
@@ -553,16 +732,19 @@ function testSql() {
 }
 
 // ---------------------------------------------------------------------------
-// RESET HISTORIAL SQL
+// RESET HISTORIAL SQL — v4.6: el checkpoint es por hospital_id
 // ---------------------------------------------------------------------------
 async function resetHistorial() {
+    if (perfilActivoIndex === null) return;
+    const hospitalId = document.getElementById('hosp_id').value.trim();
+
     if (confirm(
         "⚠️ ¿Estás seguro?\n\n" +
-        "Esto borrará la memoria del Agente y obligará a extraer todos los datos " +
-        "históricos desde la 'Fecha Inicio' hasta hoy.\n\n" +
+        "Esto borrará la memoria del Agente para este hospital y obligará a extraer " +
+        "todos los datos históricos desde la 'Fecha Inicio' hasta hoy.\n\n" +
         "Puede tardar varias horas (1 bloque cada intervalo configurado)."
     )) {
-        const res = await eel.reset_historial_sql()();
+        const res = await pywebview.api.reset_historial_sql(hospitalId);
         alert(res
             ? "✅ Memoria borrada. Guardá la configuración para iniciar el Backfill."
             : "ℹ️ No había registro previo o ya estaba limpio.");
@@ -570,11 +752,11 @@ async function resetHistorial() {
 }
 
 // ---------------------------------------------------------------------------
-// CONTROL DEL SERVICIO
+// CONTROL DEL SERVICIO (global — un único proceso sirve todos los hospitales)
 // ---------------------------------------------------------------------------
 async function checkStatus() {
     try {
-        const running = await eel.check_service_status()();
+        const running = await pywebview.api.check_service_status();
         updateStatusBadge(running);
     } catch (e) {
         // Falla silenciosa: Python puede estar reiniciando
@@ -609,7 +791,7 @@ async function toggleMonitoreo() {
     btn.className = 'btn btn-secondary btn-lg';
 
     try {
-        const res = await eel.toggle_monitoreo(accion)();
+        const res = await pywebview.api.toggle_monitoreo(accion);
 
         if (res && res.success === false) {
             btn.disabled = false;
@@ -625,14 +807,14 @@ async function toggleMonitoreo() {
 }
 
 // ---------------------------------------------------------------------------
-// LOGS EN VIVO
+// LOGS EN VIVO (global — todos los hospitales comparten activity.log)
 // ---------------------------------------------------------------------------
 function iniciarLogReader() {
     if (logInterval) clearInterval(logInterval);
 
     logInterval = setInterval(async () => {
         try {
-            const res = await eel.leer_log_delta(logPosition)();
+            const res = await pywebview.api.leer_log_delta(logPosition);
             if (res?.content) {
                 const box = document.getElementById('log_console');
                 if (logPosition === 0 && box.innerText.includes("Esperando")) {
@@ -649,7 +831,7 @@ function iniciarLogReader() {
 }
 
 async function limpiarConsola() {
-    const res = await eel.limpiar_log()();
+    const res = await pywebview.api.limpiar_log();
     if (res) {
         document.getElementById('log_console').innerText = "--- Log limpiado por el usuario ---";
         logPosition = 0;
@@ -701,13 +883,13 @@ async function testMirth(btnElement) {
         user: card.querySelector('.mirth-user').value,
         pass: card.querySelector('.mirth-pass').value,
     };
-    
+
     const originalHtml = btnElement.innerHTML;
     btnElement.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
     btnElement.disabled  = true;
 
     try {
-        const res = await eel.test_mirth_gui(data)();
+        const res = await pywebview.api.test_mirth_gui(data);
         btnElement.innerHTML = originalHtml;
         btnElement.disabled  = false;
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
@@ -730,7 +912,7 @@ function agregarSSL(data = null) {
     <div class="card p-2 mb-2 border bg-light ssl-card" id="ssl_${id}">
         <div class="row g-2 align-items-center">
             <div class="col-md-8">
-                <input type="text" class="form-control ssl-url border-primary" 
+                <input type="text" class="form-control ssl-url border-primary"
                        placeholder="https://pacs.hospital.com" value="${urlVal}">
             </div>
             <div class="col-md-4 d-flex justify-content-end gap-2">
@@ -749,7 +931,7 @@ function agregarSSL(data = null) {
 async function testSSL(btnElement) {
     const card = btnElement.closest('.ssl-card');
     const url  = card.querySelector('.ssl-url').value.trim();
-    
+
     if (!url) {
         alert("⚠️ Ingresá una URL válida primero.");
         return;
@@ -760,7 +942,7 @@ async function testSSL(btnElement) {
     btnElement.disabled  = true;
 
     try {
-        const res = await eel.test_ssl_gui({url: url})();
+        const res = await pywebview.api.test_ssl_gui({ url: url });
         btnElement.innerHTML = originalHtml;
         btnElement.disabled  = false;
         alert(res.success ? `${res.msg}` : `❌ ${res.msg}`);
@@ -772,7 +954,7 @@ async function testSSL(btnElement) {
 }
 
 // ---------------------------------------------------------------------------
-// GESTION ELASTIC (LOGS + AUTOENRUTE)
+// GESTION ELASTIC (LOGS + AUTOENRUTE + KPIs DE RIS)
 // ---------------------------------------------------------------------------
 function _leerConfigElasticDesdeUI() {
     return {
@@ -801,7 +983,7 @@ async function testElastic() {
     }
 
     try {
-        const res = await eel.test_elastic_gui(data)();
+        const res = await pywebview.api.test_elastic_gui(data);
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
     } catch (e) {
@@ -827,7 +1009,7 @@ async function testDicomIndex() {
     }
 
     try {
-        const res = await eel.test_dicom_index_gui(data)();
+        const res = await pywebview.api.test_dicom_index_gui(data);
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
     } catch (e) {
@@ -853,7 +1035,7 @@ async function testRisMetrics() {
     }
 
     try {
-        const res = await eel.test_ris_metrics_gui(data)();
+        const res = await pywebview.api.test_ris_metrics_gui(data);
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ Todo OK:\n${res.msg}` : `❌ Hay problemas:\n${res.msg}`);
     } catch (e) {

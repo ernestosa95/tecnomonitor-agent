@@ -418,18 +418,144 @@ DICOM** (un router/cache de imágenes separado del PACS principal). La idea es q
 agente instalado reporte también sobre estos sistemas adicionales, sin necesitar una instalación
 del agente por sistema.
 
-Preguntas a resolver cuando se diseñe esto (todavía sin responder, no decidir nada acá todavía):
+**Decisión de diseño (2026-09-12):** a diferencia de `vms[]` (un array liviano de *targets* WMI
+dentro de un mismo envelope), cada sistema adicional se va a monitorear **como si fuera un
+hospital independiente**: su propia configuración de conexión (credenciales, host, protocolo),
+su propio `hospital_id` y su propio `auth_token` emitido por el panel del servidor, y su propio
+envelope/POST — no un objeto más colgado del envelope del hospital principal. La diferencia con
+"un hospital = un agente físico" de hoy es solo que **un mismo proceso agente** pasa a ejecutar
+el ciclo completo una vez por cada perfil configurado, en vez de una sola vez.
 
-- ¿Qué tecnología expone la cache DICOM sus métricas — SQL Server propio (mismo patrón que
-  `vms[]`/WMI para IPs remotas), una API HTTP, SNMP, o algo específico del fabricante? Puede
-  variar de un sistema a otro, a diferencia de WMI que es uniforme para todo Windows.
-- ¿Encaja como una lista más al estilo `vms[]` (un array de "objetivos adicionales" con su
-  propio tipo/protocolo), o necesita su propia sección de configuración dedicada en la GUI?
-- ¿El envelope necesita una clave nueva para esto, o se puede modelar reusando alguna ya
-  existente (ej. otro objeto dentro de `virtual_layer` o `software_monitoring`) sin romper el
-  contrato con el servidor?
-- ¿Cuántos sistemas de este tipo puede tener un mismo hospital en la práctica? — define si vale
-  la pena optimizar para "uno o dos más" o si hay que pensar en una lista abierta desde el
-  principio.
+```
+                    ┌─────────────────────────────────────────────────────────┐
+                    │   Equipo Windows en el hospital (un único agente)        │
+                    │                                                         │
+                    │   monitor_config.json                                   │
+                    │   ┌─────────────────────────────────────────────────┐   │
+                    │   │ instalaciones: [                                 │   │
+                    │   │   { hospital_id: "HOSP-A",        auth_token: A, │   │
+                    │   │     enabled: true,                               │   │
+                    │   │     sql_cfg, idrac_cfg, vms[], mirth_cfg, ... },  │   │
+                    │   │   { hospital_id: "HOSP-A-DICOM",  auth_token: B, │   │
+                    │   │     enabled: true,  sql_cfg (mismo patrón) },    │   │
+                    │   │   { hospital_id: "HOSP-B", ...    auth_token: C, │   │
+                    │   │     enabled: false }  ← nodo desactivado         │   │
+                    │   │ ]  (hasta 3 perfiles, caso realista actual)      │   │
+                    │   └─────────────────────────────────────────────────┘   │
+                    │             ▲                                          │
+                    │             │ lee cada ciclo                            │
+                    │   ┌─────────┴─────────┐                                │
+                    │   │TecnoMonitorService │                                │
+                    │   │(headless_service.py)│                               │
+                    │   └─────────┬─────────┘                                │
+                    │             │ interval_minutes global, único tick;      │
+                    │             │ por cada instalación con enabled=true      │
+                    │             │ (secuencial, sin paralelismo entre perfiles):│
+                    │             │   try:    ejecutar_ciclo_agente(inst_i)    │
+                    │             │   except: log_func(inst_i, e); continue   │
+                    │             │                                          │
+                    │     ┌───────┼──────────────┬───────────────────┐       │
+                    │     ▼       │              ▼                   ▼       │
+                    │ [SQL/iDRAC/VMs...]   [SQL (mismo patrón      [saltado:  │
+                    │    HOSP-A              que RIS/PACS)          enabled  │
+                    │                        HOSP-A-DICOM           =false]  │
+                    └──────┬──────────────────────┬───────────────────┴──────┘
+                           │                      │             (sin POST —
+                           │   HTTPS POST (Authorization:      nodo desactivado)
+                           │    Bearer <auth_token_i>)
+                           ▼                      ▼
+                    ┌─────────────────────────────────────────────────────────┐
+                    │              Servidor central TecnoMonitor                │
+                    │  (recibe un reporte por cada perfil activo, uno por       │
+                    │   hospital_id — HOSP-B simplemente no reporta este ciclo) │
+                    └─────────────────────────────────────────────────────────┘
+```
 
-No es un ítem de la lista de v4.5 — queda anotado acá como el próximo tema de diseño a retomar.
+Implicancias de esta decisión sobre el código actual:
+
+- **Reutiliza el 100% de la lógica de recolección existente** (`obtener_storage_fisico_v3`,
+  `extraer_metricas_sql`, `obtener_vm_data`, `recolectar_logs_elastic`, etc.) sin cambios de
+  forma — cada función ya recibe su config como parámetro, solo pasa a invocarse una vez por
+  perfil en vez de una vez por ciclo. **No hace falta tocar el contrato con el servidor**: cada
+  perfil arma y envía su propio envelope, `alerts_engine` no se entera de que comparten proceso.
+- **Aislamiento de fallas por perfil**: si un perfil rompe (ej. credenciales SQL vencidas de la
+  cache DICOM), el `try/except` alrededor de cada `ejecutar_ciclo_agente(inst_i)` tiene que
+  evitar que tumbe el resto — hoy una excepción no controlada en el bucle mata el ciclo entero
+  (ver §"Ciclo de vida del servicio" en [ARQUITECTURA.md](./ARQUITECTURA.md)).
+- **Checkpoints por perfil**: `.sql_checkpoint`/`.elastic_checkpoint` hoy son archivos únicos;
+  pasan a necesitar sufijo por `hospital_id` (`.sql_checkpoint_<hospital_id>`), porque cada
+  perfil avanza su propio watermark de forma independiente.
+- **`activity.log` por perfil**: con N ciclos intercalados en el mismo log, cada línea necesita
+  un prefijo `[hospital_id]` para poder diagnosticar cuál perfil generó cada entrada.
+- **GUI multi-perfil**: `main_gui.py`/`web/` pasan de editar un único formulario a necesitar un
+  selector de perfil (agregar/editar/quitar) que muestre, para el perfil activo, las mismas
+  pestañas que hoy (SQL, iDRAC, VMs, Mirth, SSL, RIS/Elastic), más un toggle **activo/inactivo**
+  por perfil (`enabled`) — es la parte de mayor esfuerzo de UI de todo el cambio.
+- **`secret.key` se sigue compartiendo** a nivel de instalación (un solo archivo por equipo
+  Windows) — solo cambia la forma del JSON que cifra/descifra, de un objeto plano a un array de
+  objetos.
+
+**Decisiones tomadas (2026-09-12), cierran las preguntas que habían quedado abiertas:**
+
+1. **Tecnología de la cache DICOM:** es la misma que ya se usa para RIS/PACS — SQL Server, mismo
+   patrón que `sql_cfg`/`extraer_metricas_sql`. No hace falta soportar un tipo de perfil nuevo;
+   el perfil de la cache DICOM reusa la misma forma de configuración (host, credenciales, query),
+   solo apunta a otra base y viaja bajo su propio `hospital_id`/`auth_token`.
+2. **Cadencia:** global — un único `interval_minutes` de servicio, todos los perfiles se recorren
+   secuencialmente en cada tick (sin scheduler independiente por perfil). Sí se agrega un flag
+   **`enabled` por perfil** (visible como toggle en la GUI) para poder desactivar el monitoreo de
+   un nodo puntual sin borrar su configuración — el bucle salta los perfiles con `enabled: false`
+   sin intentar el ciclo ni contarlos como error.
+3. **Cantidad de perfiles:** hasta 3 en el caso realista actual. No justifica paralelizar entre
+   perfiles (`ThreadPoolExecutor` a ese nivel) — secuencial alcanza; el paralelismo interno que ya
+   existe por perfil (VMs, iDRAC) no cambia.
+
+### 9.1.1 Migración de `monitor_config.json` existentes (formato plano → `instalaciones[]`)
+
+Hoy hay hospitales reales en producción con `monitor_config.json` en el **formato plano actual**
+(un solo objeto con `hospital_id`, `auth_token`, `sql`, `idrac`, `vms[]`, `mirth_servers[]`,
+`elastic`, etc. — ver `cargar_config`/`guardar_config` en `main_gui.py` y
+`cargar_config_segura` en `headless_service.py`). El cambio a `instalaciones[]` no puede asumir
+que alguien va a re-configurar cada hospital a mano desde la GUI: tiene que migrarse solo.
+
+**Estrategia: migración transparente y autocurativa en el primer arranque tras actualizar.**
+
+- **Detección:** si el JSON leído del disco **no tiene la clave `instalaciones`**, es formato
+  viejo (plano).
+- **Migración en memoria:** envolver el dict plano completo, tal cual viene del disco (todavía
+  con las credenciales cifradas, antes de cualquier desencriptado), como el único elemento de
+  `instalaciones[]`, agregando `"enabled": true`:
+  ```python
+  def migrar_config_legacy(data: dict) -> dict:
+      if "instalaciones" in data:
+          return data  # ya migrado
+      return {"instalaciones": [{**data, "enabled": True}]}
+  ```
+- **Dónde vive:** en `agent_logic.py` (ya lo importan tanto `main_gui.py` como
+  `headless_service.py`), para no duplicar la detección en los dos puntos de carga que hoy existen
+  por separado — esto también es la oportunidad de unificar `_desencriptar_config`
+  (`main_gui.py`) y el bloque de desencriptado inline de `cargar_config_segura`
+  (`headless_service.py`), que hoy repiten la misma lista de campos dos veces en dos archivos.
+- **Persistencia inmediata (self-healing):** tras migrar en memoria, reescribir
+  `monitor_config.json` ya en formato nuevo con el mismo patrón de escritura atómica que usa
+  `guardar_config` (`.tmp` + `os.replace`). Así la migración ocurre **una sola vez**, en el primer
+  ciclo tras actualizar el binario — no en cada lectura, y no depende de que un admin abra la GUI
+  y guarde para que el hospital quede en formato nuevo.
+- **Efecto en cascada sobre encriptado/desencriptado:** `_desencriptar_config` y el encriptado en
+  `guardar_config` hoy operan sobre campos de nivel superior (`config["sql"]["pass"]`, etc.). Con
+  `instalaciones[]`, ese mismo bloque de campos a cifrar/descifrar pasa a repetirse **por cada
+  perfil** (`for perfil in config["instalaciones"]: ...`) — es un cambio mecánico (mover el cuerpo
+  existente adentro de un loop), no una reescritura de la lógica de cifrado en sí.
+- **Riesgo a documentar, no a resolver ahora:** si algún día se hace rollback del binario a una
+  versión anterior a este cambio después de que un hospital ya migró, esa versión vieja no
+  entiende `instalaciones[]` y no va a poder leer su propia configuración. Mismo tipo de riesgo
+  que ya está anotado para el rollback de `schema_version` (§2, punto 5) — vale la pena resolver
+  ambos con el mismo mecanismo si se llega a implementar un plan de rollback formal.
+- **Versionado a futuro:** para no depender para siempre de "detectar por ausencia de una clave"
+  como única señal de migración, conviene agregar un campo explícito `config_version` (ej. `2`)
+  al escribir el archivo migrado, para que una migración futura (ej. `instalaciones[]` cambia de
+  forma otra vez) tenga una señal clara de qué versión está leyendo en vez de encadenar más
+  detecciones heurísticas.
+
+No es un ítem de la lista de v4.5 — con las tres decisiones tomadas, este diseño queda listo para
+pasar a implementación cuando se priorice.

@@ -256,38 +256,21 @@ def detectar_agente_legacy() -> bool:
 # CARGA DE CONFIGURACIÓN
 # ---------------------------------------------------------------------------
 def cargar_config_segura():
+    """
+    Devuelve la config raíz completa: {"instalaciones": [...], "config_version": 2,
+    "interval_minutes": N}. Migra automáticamente (y persiste el resultado)
+    si el archivo todavía está en el formato plano pre-v4.6 — ver
+    agent_logic.migrar_y_persistir_si_hace_falta y
+    docs/PLAN_MEJORAS_V4.5.md §9.1.1.
+    """
     if not os.path.exists(CONFIG_FILE):
         return None
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        if data.get("auth_token"):
-            data["auth_token"] = security.desencriptar(data["auth_token"])
-
-        if isinstance(data.get("proxmox"), dict) and data["proxmox"].get("pass"):
-            data["proxmox"]["pass"] = security.desencriptar(data["proxmox"]["pass"])
-
-        if isinstance(data.get("idrac"), dict) and data["idrac"].get("pass"):
-            data["idrac"]["pass"] = security.desencriptar(data["idrac"]["pass"])
-
-        if isinstance(data.get("sql"), dict) and data["sql"].get("pass"):
-            data["sql"]["pass"] = security.desencriptar(data["sql"]["pass"])
-
-        if isinstance(data.get("vms"), list):
-            for vm in data["vms"]:
-                if isinstance(vm, dict) and vm.get("pass"):
-                    vm["pass"] = security.desencriptar(vm["pass"])
-
-        if isinstance(data.get("mirth_servers"), list):
-            for m in data["mirth_servers"]:
-                if isinstance(m, dict) and m.get("pass"):
-                    m["pass"] = security.desencriptar(m["pass"])
-
-        if isinstance(data.get("elastic"), dict) and data["elastic"].get("pass"):
-            data["elastic"]["pass"] = security.desencriptar(data["elastic"]["pass"])
-
-        return data
+        data = agent_logic.migrar_y_persistir_si_hace_falta(data, CONFIG_FILE)
+        return agent_logic.desencriptar_config(data)
 
     except json.JSONDecodeError as e:
         log(f"❌ monitor_config.json malformado: {e}")
@@ -319,10 +302,11 @@ def ejecutar_un_ciclo(cfg, log_func, debe_continuar=lambda: True):
     """
     # --- Módulo SQL (KPIs de negocio): vía Elastic si el hospital ya
     # migró su Logstash (ver elk/), si no vía SQL Server directo. ---
+    hospital_id = cfg.get("hospital_id")
     elastic_cfg = cfg.get("elastic") or {}
     if elastic_cfg.get("enabled_ris_metrics") and elastic_cfg.get("host"):
         try:
-            sql_data = agent_logic.extraer_metricas_ris_elastic(elastic_cfg, log_func=log_func)
+            sql_data = agent_logic.extraer_metricas_ris_elastic(elastic_cfg, hospital_id, log_func=log_func)
             if sql_data:
                 cfg["_sql_data_payload"] = sql_data
             else:
@@ -331,7 +315,7 @@ def ejecutar_un_ciclo(cfg, log_func, debe_continuar=lambda: True):
             log_func(f"❌ Error en módulo RIS/Elastic: {e}")
     elif cfg.get("enabled_sql") and cfg.get("sql"):
         try:
-            sql_data = agent_logic.extraer_metricas_sql(cfg["sql"], log_func=log_func)
+            sql_data = agent_logic.extraer_metricas_sql(cfg["sql"], hospital_id, log_func=log_func)
             if sql_data:
                 cfg["_sql_data_payload"] = sql_data
             else:
@@ -354,6 +338,32 @@ def ejecutar_un_ciclo(cfg, log_func, debe_continuar=lambda: True):
             log_func(f"❌ Fallo en el envío: {res.get('error', 'Error desconocido')}")
     else:
         log_func(f"⚠️ Respuesta inesperada del ciclo: {res}")
+
+
+# ---------------------------------------------------------------------------
+# CICLO MULTI-PERFIL (v4.6) — recorre instalaciones[], una por una, con
+# aislamiento de fallas: un perfil roto (credenciales vencidas, host caído)
+# no debe impedir que el resto reporte. Ver docs/PLAN_MEJORAS_V4.5.md §9.1.
+# ---------------------------------------------------------------------------
+def ejecutar_todos_los_perfiles(cfg_raiz, debe_continuar=lambda: True):
+    for perfil in cfg_raiz.get("instalaciones", []):
+        hid = perfil.get("hospital_id", "?")
+
+        if not perfil.get("enabled", True):
+            log(f"[{hid}] ⏸️ Perfil desactivado (enabled=false), se omite.")
+            continue
+
+        try:
+            ejecutar_un_ciclo(
+                perfil,
+                log_func=lambda m, hid=hid: log(f"[{hid}] {m}"),
+                debe_continuar=debe_continuar,
+            )
+        except Exception as e:
+            log(f"[{hid}] ❌ Error de ciclo no controlado: {e}")
+
+        if not debe_continuar():
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +468,7 @@ class TecnoMonitorService(win32serviceutil.ServiceFramework):
                         break
                     continue
 
-                ejecutar_un_ciclo(cfg, log, debe_continuar=lambda: not self.detener)
+                ejecutar_todos_los_perfiles(cfg, debe_continuar=lambda: not self.detener)
 
                 try:
                     minutos = float(cfg.get("interval_minutes", 5))
@@ -518,7 +528,7 @@ if __name__ == '__main__':
             if not cfg:
                 log("⚠️ Configuración no disponible. Se omite este ciclo.")
             else:
-                ejecutar_un_ciclo(cfg, log)
+                ejecutar_todos_los_perfiles(cfg)
         except Exception:
             detalle = traceback.format_exc()
             log(f"💥 Excepción no controlada en el ciclo:\n{detalle}")
