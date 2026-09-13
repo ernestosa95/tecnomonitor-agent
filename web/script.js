@@ -2,7 +2,9 @@
 // VARIABLES GLOBALES
 //
 // v4.6: monitor_config.json pasa a {instalaciones: [...], interval_minutes,
-// config_version}. `config` guarda ese objeto raíz completo en memoria;
+// central_url, config_version}. central_url es una sola para todo el
+// agente (no por hospital) -- se edita en el bloque "Avanzado" de Home.
+// `config` guarda ese objeto raíz completo en memoria;
 // `perfilActivoIndex` cuál hospital está abierto en el detalle (null en
 // Home); `modulosActivos` qué mediciones tiene ese hospital (proxmox, idrac,
 // vms, sql, mirth, ssl, elastic) mientras se edita, antes de guardar.
@@ -53,23 +55,22 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
-// ---------------------------------------------------------------------------
-// UI — hipervisor y sub-toggles de ElasticSearch
-// ---------------------------------------------------------------------------
-function toggleDicomRouting(checkbox) {
-    const el = document.getElementById('dicom_routing_fields');
-    if (!el) return;
-    el.style.opacity       = checkbox.checked ? '1'    : '0.5';
-    el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
+// Vacía una lista dinámica de tarjetas (equipos, servidores Mirth) sin dejar
+// modales huérfanos: cada tarjeta guarda el id de su modal en
+// data-modal-id, y el modal en sí vive en <body> (no dentro del
+// contenedor), porque son modales de Bootstrap creados dinámicamente — ver
+// agregarVM()/agregarMirth(). Conserva la tarjeta ".add-card" fija.
+function _limpiarListaDinamica(containerId) {
+    document.querySelectorAll(`#${containerId} .modulo-card`).forEach(card => {
+        const modalId = card.dataset.modalId;
+        if (modalId) document.getElementById(modalId)?.remove();
+        card.remove();
+    });
 }
 
-function toggleRisMetrics(checkbox) {
-    const el = document.getElementById('ris_metrics_fields');
-    if (!el) return;
-    el.style.opacity       = checkbox.checked ? '1'    : '0.5';
-    el.style.pointerEvents = checkbox.checked ? 'auto' : 'none';
-}
-
+// ---------------------------------------------------------------------------
+// UI — hipervisor
+// ---------------------------------------------------------------------------
 function toggleHypervisorFields() {
     const type          = document.getElementById('hyper_type').value;
     const nodeContainer = document.getElementById('px_node_container');
@@ -128,6 +129,7 @@ async function cargarConfiguracion() {
         config = cfg;
         if (!Array.isArray(config.instalaciones)) config.instalaciones = [];
         if (!config.interval_minutes) config.interval_minutes = 5;
+        if (!config.central_url) config.central_url = 'https://tecnomonitor.tecnoimagen.com.ar/v1/hospital-status';
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
         config = { instalaciones: [], config_version: 2, interval_minutes: 5 };
@@ -188,6 +190,7 @@ function renderHome() {
     const grid = document.getElementById('homeGrid');
     grid.innerHTML = '';
     document.getElementById('intervalo').value = config.interval_minutes || 5;
+    document.getElementById('central_url').value = config.central_url || '';
 
     (config.instalaciones || []).forEach((perfil, i) => {
         const activo = perfil.enabled !== false;
@@ -195,7 +198,7 @@ function renderHome() {
         div.className = 'hospital-card';
         div.innerHTML = `
             <div class="card-top">
-                <span class="hospital-id"><i class="fas fa-hospital me-1"></i>${escapeHtml(perfil.hospital_id || '(sin nombre)')}</span>
+                <span class="hospital-id" title="${escapeHtml(perfil.hospital_id || '(sin nombre)')}"><i class="fas fa-hospital"></i><span>${escapeHtml(perfil.hospital_id || '(sin nombre)')}</span></span>
                 <span class="badge ${activo ? 'bg-success' : 'bg-secondary'}">${activo ? 'Activo' : 'Inactivo'}</span>
             </div>
             <small class="text-muted">${determinarModulosActivos(perfil).length} mediciones configuradas</small>
@@ -261,7 +264,6 @@ function agregarHospital() {
     const nuevo = {
         hospital_id: id.trim(),
         auth_token: '',
-        central_url: (config.instalaciones[0] && config.instalaciones[0].central_url) || '',
         enabled: true,
     };
     config.instalaciones.push(nuevo);
@@ -289,9 +291,11 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('idrac_user').value = idrac.user || '';
     document.getElementById('idrac_pass').value = idrac.pass || '';
 
-    // Equipos Windows (VMs)
-    const vmsContainer = document.getElementById('vms_list');
-    vmsContainer.innerHTML = '';
+    // Equipos Windows (VMs) — tarjeta + modal por equipo, ver agregarVM().
+    // El modal de cada equipo vive en <body>, no dentro de #vms_list, así
+    // que limpiar solo con innerHTML='' dejaría modales huérfanos de la
+    // vez anterior; _limpiarListaDinamica saca tarjeta + modal de a par.
+    _limpiarListaDinamica('vms_list');
     (perfil.vms || []).forEach(vm => agregarVM(vm));
 
     // SQL
@@ -302,10 +306,10 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('sql_pass').value       = sql.pass || '';
     document.getElementById('sql_exec_day').value   = sql.executions_per_day || 3;
     document.getElementById('sql_start_date').value = sql.historical_start_date || '';
+    document.getElementById('sql_enabled_dicom_routing').checked = !!sql.enabled_dicom_routing;
 
-    // Mirth
-    const mirthContainer = document.getElementById('mirth_list');
-    mirthContainer.innerHTML = '';
+    // Mirth — mismo patrón tarjeta + modal que los equipos.
+    _limpiarListaDinamica('mirth_list');
     (perfil.mirth_servers || []).forEach(m => agregarMirth(m));
 
     // SSL
@@ -321,6 +325,10 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('elastic_pass').value          = el.pass || '';
     document.getElementById('elastic_index_pattern').value = el.index_pattern || 'se-es-logging-*';
     document.getElementById('elastic_use_https').checked   = !!el.use_https;
+    // Retrocompatible: configs guardadas antes de este sub-toggle no tienen
+    // la clave, y los logs ya estaban activos siempre que Elastic lo estaba
+    // — "ausente o true" = activo, solo un false explícito lo desactiva.
+    document.getElementById('elastic_enabled_logs').checked = el.enabled_logs !== false;
     document.getElementById('elastic_dicom_index').value   = el.dicom_index || 'ext_dicom_queues';
     document.getElementById('elastic_dicom_max_age').value = el.dicom_max_age_minutes || 15;
 
@@ -336,13 +344,8 @@ function poblarFormularioModulos(perfil) {
             ? el.enabled_dicom_routing
             : !!(sql && sql.enabled_dicom_routing);
 
-    const chkDicom = document.getElementById('enabled_dicom_routing');
-    chkDicom.checked = dicomRoutingActivo;
-    toggleDicomRouting(chkDicom);
-
-    const chkRisMetrics = document.getElementById('enabled_ris_metrics');
-    chkRisMetrics.checked = !!el.enabled_ris_metrics;
-    toggleRisMetrics(chkRisMetrics);
+    document.getElementById('enabled_dicom_routing').checked = dicomRoutingActivo;
+    document.getElementById('enabled_ris_metrics').checked   = !!el.enabled_ris_metrics;
 }
 
 function abrirHospital(index) {
@@ -351,7 +354,6 @@ function abrirHospital(index) {
 
     document.getElementById('hosp_id').value     = perfil.hospital_id || '';
     document.getElementById('auth_token').value  = perfil.auth_token || '';
-    document.getElementById('central_url').value = perfil.central_url || '';
 
     poblarFormularioModulos(perfil);
     modulosActivos = determinarModulosActivos(perfil);
@@ -364,14 +366,11 @@ function abrirHospital(index) {
     mostrarDetalle();
 }
 
-async function guardarPerfilActivo() {
-    if (perfilActivoIndex === null) return;
-
-    const btn = document.querySelector('button[onclick="guardarPerfilActivo()"]');
-    const originalText = btn ? btn.innerHTML : null;
-    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...'; btn.disabled = true; }
-
-    // --- Recolectar lista de VMs ---
+// Construye el objeto de perfil a partir de lo que hay ESCRITO en el
+// formulario en este momento — usado tanto para guardar (persiste el
+// resultado) como para "Enviar ahora" (lo manda tal cual, sin guardar antes,
+// para poder validar cambios todavía no confirmados).
+function _armarPerfilDesdeFormulario() {
     const vms = [];
     document.querySelectorAll('.vm-card').forEach(card => {
         vms.push({
@@ -381,11 +380,10 @@ async function guardarPerfilActivo() {
             ip:        card.querySelector('.vm-ip').value.trim(),
             user:      card.querySelector('.vm-user').value.trim(),
             pass:      card.querySelector('.vm-pass').value,
-            servicios: card.querySelector('.vm-servicios').value.trim(),
+            servicios: Array.from(card.querySelectorAll('.vm-servicio-tag')).map(el => el.dataset.servicio).join(','),
         });
     });
 
-    // --- Recolectar lista de Mirth Connect ---
     const mirth_servers = [];
     document.querySelectorAll('.mirth-card').forEach(card => {
         mirth_servers.push({
@@ -396,18 +394,17 @@ async function guardarPerfilActivo() {
         });
     });
 
-    // --- Recolectar lista de SSL ---
     const ssl_urls = [];
     document.querySelectorAll('.ssl-card').forEach(card => {
         ssl_urls.push({ url: card.querySelector('.ssl-url').value.trim() });
     });
 
-    const perfilPrevio = config.instalaciones[perfilActivoIndex] || {};
+    const perfilPrevio = (perfilActivoIndex !== null && config.instalaciones[perfilActivoIndex]) || {};
 
-    const perfil = {
+    return {
         hospital_id:  document.getElementById('hosp_id').value.trim(),
         auth_token:   document.getElementById('auth_token').value,
-        central_url:  document.getElementById('central_url').value.trim(),
+        central_url:  config.central_url || '',
         enabled:      perfilPrevio.enabled !== false,
 
         enabled_proxmox: modulosActivos.includes('proxmox'),
@@ -434,6 +431,7 @@ async function guardarPerfilActivo() {
             pass:                  document.getElementById('sql_pass').value,
             executions_per_day:    parseInt(document.getElementById('sql_exec_day').value) || 3,
             historical_start_date: document.getElementById('sql_start_date').value,
+            enabled_dicom_routing: document.getElementById('sql_enabled_dicom_routing').checked,
         },
 
         enabled_vms: modulosActivos.includes('vms'),
@@ -453,6 +451,7 @@ async function guardarPerfilActivo() {
             pass:          document.getElementById('elastic_pass').value,
             index_pattern: document.getElementById('elastic_index_pattern').value.trim() || 'se-es-logging-*',
             use_https:     document.getElementById('elastic_use_https').checked,
+            enabled_logs:  document.getElementById('elastic_enabled_logs').checked,
 
             enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
             dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
@@ -466,16 +465,54 @@ async function guardarPerfilActivo() {
             ris_index_users:          document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
         },
     };
+}
 
-    config.instalaciones[perfilActivoIndex] = perfil;
+async function guardarPerfilActivo() {
+    if (perfilActivoIndex === null) return;
+
+    const btn = document.querySelector('button[onclick="guardarPerfilActivo()"]');
+    const originalText = btn ? btn.innerHTML : null;
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...'; btn.disabled = true; }
+
+    config.instalaciones[perfilActivoIndex] = _armarPerfilDesdeFormulario();
 
     await persistirConfig();
 
     if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
 }
 
+async function enviarAhora() {
+    if (perfilActivoIndex === null) return;
+
+    const perfil = _armarPerfilDesdeFormulario();
+    if (!perfil.hospital_id || !perfil.central_url) {
+        alert("⚠️ Completá al menos el ID de hospital y la URL del servidor central antes de probar el envío.");
+        return;
+    }
+
+    const btn = document.querySelector('button[onclick="enviarAhora()"]');
+    const originalText = btn ? btn.innerHTML : null;
+    if (btn) { btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Enviando...'; btn.disabled = true; }
+
+    try {
+        const res = await pywebview.api.enviar_ahora_gui(perfil);
+        if (res && res.status === "OK") {
+            alert(`✅ Envío manual exitoso (${res.timestamp}).\n\n` +
+                  "Nota: este envío no incluye KPIs de negocio (SQL/Elastic) — esa extracción " +
+                  "corre solo dentro del ciclo normal del servicio, para no pisar su checkpoint.");
+        } else {
+            alert(`❌ Envío manual falló: ${(res && res.error) || 'error desconocido'}`);
+        }
+    } catch (e) {
+        alert("Error de comunicación con Python: " + e);
+    }
+
+    if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+}
+
 async function guardarIntervaloGlobal() {
     config.interval_minutes = parseInt(document.getElementById('intervalo').value) || 5;
+    config.central_url = document.getElementById('central_url').value.trim();
     await persistirConfig();
 }
 
@@ -577,11 +614,16 @@ const PLACEHOLDER_SERVICIOS = {
     linux:   "Ej: postgresql, logstash",
 };
 
+// Patrón "tarjeta chica + modal", igual que las mediciones del hospital
+// (renderModulosActivos): la lista muestra tarjetas resumen, tocarlas abre
+// un modal con el formulario completo — en vez de tener todos los equipos
+// siempre desplegados uno debajo del otro.
 function agregarVM(data = null) {
-    const container   = document.getElementById('vms_list');
-    const id          = Date.now();
-    const nombreVal   = data?.nombre || "";
-    const alias       = nombreVal   || "Equipo Target";
+    const listaContainer = document.getElementById('vms_list');
+    const addCard        = listaContainer.querySelector('.add-card');
+    const id              = Date.now();
+    const nombreVal       = data?.nombre || "";
+    const tituloInicial   = nombreVal || data?.ip || "Equipo nuevo";
     const selVm       = (data?.type === 'vm') ? 'selected' : '';
     const selWs       = (data?.type === 'ws') ? 'selected' : '';
     const selEq       = (data?.type === 'eq') ? 'selected' : '';
@@ -592,71 +634,147 @@ function agregarVM(data = null) {
     const selWin      = os === 'windows' ? 'selected' : '';
     const selLinux    = os === 'linux'   ? 'selected' : '';
 
-    const html = `
-    <div class="card p-3 mb-3 border bg-light vm-card" id="vm_${id}">
-        <div class="d-flex justify-content-between mb-2">
-            <h6 class="fw-bold text-primary mb-0"><i class="fas fa-desktop me-2"></i>${alias}</h6>
-            <button class="btn btn-sm btn-outline-danger"
-                    onclick="document.getElementById('vm_${id}').remove()">
-                <i class="fas fa-trash"></i> Quitar
-            </button>
-        </div>
-        <div class="row g-2">
-            <div class="col-md-4">
-                <label class="form-label text-muted small mb-0 fw-bold">Nombre (Opcional)</label>
-                <input type="text" class="form-control vm-nombre border-primary"
-                       placeholder="En blanco = Automático" value="${nombreVal}">
-            </div>
-            <div class="col-md-4">
-                <label class="form-label text-muted small mb-0 fw-bold">Tipo</label>
-                <select class="form-select vm-type">
-                    <option value="vm" ${selVm || defaultType}>Máquina Virtual (VM)</option>
-                    <option value="ws" ${selWs}>Workstation Física (WS)</option>
-                    <option value="eq" ${selEq}>Equipo Médico (EQ)</option>
-                </select>
-            </div>
-            <div class="col-md-4">
-                <label class="form-label text-muted small mb-0 fw-bold">Sistema Operativo</label>
-                <select class="form-select vm-os" onchange="actualizarPlaceholderServicios(this)">
-                    <option value="windows" ${selWin}>Windows (WMI)</option>
-                    <option value="linux" ${selLinux}>Linux (SSH)</option>
-                </select>
-            </div>
-            <div class="col-md-4 mt-2">
-                <label class="form-label text-muted small mb-0 fw-bold">IP / Hostname</label>
-                <input type="text" class="form-control vm-ip"
-                       placeholder="Ej: 192.168.1.50" value="${data?.ip || ''}">
-            </div>
-            <div class="col-md-4 mt-2">
-                <input type="text" class="form-control vm-user"
-                       placeholder="Usuario" value="${data?.user || ''}">
-            </div>
-            <div class="col-md-4 mt-2">
-                <input type="password" class="form-control vm-pass"
-                       placeholder="Password" value="${data?.pass || ''}"
-                       oncopy="return false" oncut="return false"
-                       autocomplete="new-password">
-            </div>
-            <div class="col-md-4 mt-2">
-                <button class="btn btn-warning w-100 text-white shadow-sm" onclick="testVM(this)">
-                    <i class="fas fa-bolt me-1"></i> Test conexión
-                </button>
-            </div>
-            <div class="col-md-12 mt-2">
-                <label class="form-label text-muted small mb-0 fw-bold">Servicios a monitorear</label>
-                <input type="text" class="form-control vm-servicios"
-                       placeholder="${PLACEHOLDER_SERVICIOS[os]}"
-                       value="${data?.servicios || ''}">
+    const serviciosIniciales = (Array.isArray(data?.servicios) ? data.servicios : (data?.servicios || '').split(','))
+        .map(s => s.trim()).filter(Boolean);
+    const chipsHtml = serviciosIniciales.map(s => _chipServicioHtml(s)).join('');
+
+    const cardHtml = `
+    <div class="modulo-card" id="vm_card_${id}" data-modal-id="vm_modal_${id}"
+         onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('vm_modal_${id}')).show()">
+        <i class="fas fa-desktop fa-lg text-primary mb-1"></i>
+        <span class="modulo-titulo">${escapeHtml(tituloInicial)}</span>
+    </div>`;
+    addCard.insertAdjacentHTML('beforebegin', cardHtml);
+
+    const modalHtml = `
+    <div class="modal fade" id="vm_modal_${id}" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-desktop me-2"></i><span class="vm-modal-titulo">${escapeHtml(tituloInicial)}</span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body vm-card" id="vm_${id}">
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small mb-0 fw-bold">Nombre (Opcional)</label>
+                            <input type="text" class="form-control vm-nombre border-primary"
+                                   placeholder="En blanco = Automático" value="${nombreVal}"
+                                   oninput="_actualizarTituloEquipo('${id}')">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small mb-0 fw-bold">Tipo</label>
+                            <select class="form-select vm-type">
+                                <option value="vm" ${selVm || defaultType}>Máquina Virtual (VM)</option>
+                                <option value="ws" ${selWs}>Workstation Física (WS)</option>
+                                <option value="eq" ${selEq}>Equipo Médico (EQ)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small mb-0 fw-bold">Sistema Operativo</label>
+                            <select class="form-select vm-os" onchange="actualizarPlaceholderServicios(this)">
+                                <option value="windows" ${selWin}>Windows (WMI)</option>
+                                <option value="linux" ${selLinux}>Linux (SSH)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 mt-2">
+                            <label class="form-label text-muted small mb-0 fw-bold">IP / Hostname</label>
+                            <input type="text" class="form-control vm-ip"
+                                   placeholder="Ej: 192.168.1.50" value="${data?.ip || ''}"
+                                   oninput="_actualizarTituloEquipo('${id}')">
+                        </div>
+                        <div class="col-md-4 mt-2">
+                            <label class="form-label text-muted small mb-0 fw-bold">Usuario</label>
+                            <input type="text" class="form-control vm-user"
+                                   placeholder="Usuario" value="${data?.user || ''}">
+                        </div>
+                        <div class="col-md-4 mt-2">
+                            <label class="form-label text-muted small mb-0 fw-bold">Contraseña</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control vm-pass"
+                                       placeholder="Password" value="${data?.pass || ''}"
+                                       oncopy="return false" oncut="return false"
+                                       autocomplete="new-password">
+                                <button class="btn btn-warning text-white" onclick="testVM(this)" title="Test conexión">
+                                    <i class="fas fa-bolt"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-12 mt-2">
+                            <label class="form-label text-muted small mb-0 fw-bold">Servicios a monitorear</label>
+                            <div class="d-flex flex-wrap gap-2 mb-2 vm-servicios-tags">${chipsHtml}</div>
+                            <div class="input-group">
+                                <input type="text" class="form-control vm-servicio-nuevo"
+                                       placeholder="${PLACEHOLDER_SERVICIOS[os]}"
+                                       onkeydown="if(event.key==='Enter'){event.preventDefault(); agregarServicioTag(this);}">
+                                <button class="btn btn-secondary" type="button" onclick="agregarServicioTag(this.previousElementSibling)"
+                                        title="Agregar servicio">
+                                    <i class="fas fa-plus"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarEquipo('${id}')">
+                        <i class="fas fa-trash me-1"></i>Quitar equipo
+                    </button>
+                </div>
             </div>
         </div>
     </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-    container.insertAdjacentHTML('beforeend', html);
+    // Un equipo recién agregado (sin datos previos) abre directo su modal
+    // para completarlo, igual que al agregar una medición nueva.
+    if (!data) {
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('vm_modal_' + id)).show();
+    }
+}
+
+function _actualizarTituloEquipo(id) {
+    const cuerpo  = document.getElementById('vm_' + id);
+    const nombre  = cuerpo.querySelector('.vm-nombre').value.trim();
+    const ip      = cuerpo.querySelector('.vm-ip').value.trim();
+    const titulo  = nombre || ip || 'Equipo nuevo';
+    const cardEl  = document.getElementById('vm_card_' + id);
+    if (cardEl) cardEl.querySelector('.modulo-titulo').textContent = titulo;
+    const modalTituloEl = document.getElementById('vm_modal_' + id)?.querySelector('.vm-modal-titulo');
+    if (modalTituloEl) modalTituloEl.textContent = titulo;
+}
+
+function quitarEquipo(id) {
+    if (!confirm('¿Quitar este equipo de la lista?')) return;
+    bootstrap.Modal.getInstance(document.getElementById('vm_modal_' + id))?.hide();
+    document.getElementById('vm_card_' + id)?.remove();
+    document.getElementById('vm_modal_' + id)?.remove();
+}
+
+function _chipServicioHtml(nombre) {
+    const seguro = escapeHtml(nombre);
+    return `<span class="badge bg-white text-dark border d-inline-flex align-items-center gap-2 vm-servicio-tag py-2 px-2" data-servicio="${seguro}">
+        ${seguro}
+        <button type="button" class="btn-close" style="font-size:0.55rem;" title="Quitar"
+                onclick="this.closest('.vm-servicio-tag').remove()"></button>
+    </span>`;
+}
+
+// Acepta uno o varios servicios separados por coma en un solo tipeo/pegado
+// (ej. pegar "MSSQLSERVER, Spooler" de una config vieja), sin obligar a
+// agregarlos de a uno.
+function agregarServicioTag(inputEl) {
+    if (!inputEl || !inputEl.value.trim()) return;
+    const contenedor = inputEl.closest('.vm-card').querySelector('.vm-servicios-tags');
+    inputEl.value.split(',').map(s => s.trim()).filter(Boolean).forEach(nombre => {
+        contenedor.insertAdjacentHTML('beforeend', _chipServicioHtml(nombre));
+    });
+    inputEl.value = '';
+    inputEl.focus();
 }
 
 function actualizarPlaceholderServicios(selectOs) {
     const card = selectOs.closest('.vm-card');
-    card.querySelector('.vm-servicios').placeholder = PLACEHOLDER_SERVICIOS[selectOs.value];
+    card.querySelector('.vm-servicio-nuevo').placeholder = PLACEHOLDER_SERVICIOS[selectOs.value];
 }
 
 // ---------------------------------------------------------------------------
@@ -734,6 +852,7 @@ async function testIdrac() {
 
 async function testVM(btnElement) {
     const card = btnElement.closest('.vm-card');
+    const id   = card.id.replace('vm_', '');
     const os   = card.querySelector('.vm-os').value;
     const data = {
         ip:   card.querySelector('.vm-ip').value,
@@ -755,6 +874,7 @@ async function testVM(btnElement) {
         if (res.success) {
             if (res.hostname) {
                 card.querySelector('.vm-nombre').value = res.hostname.toUpperCase();
+                _actualizarTituloEquipo(id);
             }
             alert(`✅ ${res.msg}\n\nEl nombre se autocompletó en el formulario.`);
         } else {
@@ -767,6 +887,7 @@ async function testVM(btnElement) {
                 );
                 if (manualName?.trim()) {
                     card.querySelector('.vm-nombre').value = manualName.trim().toUpperCase();
+                    _actualizarTituloEquipo(id);
                 }
             }
         }
@@ -888,42 +1009,84 @@ async function limpiarConsola() {
     }
 }
 
+// Mismo patrón "tarjeta chica + modal" que los equipos (agregarVM) — ver el
+// comentario ahí para el porqué.
 function agregarMirth(data = null) {
-    const container = document.getElementById('mirth_list');
-    const id        = Date.now();
-    const aliasVal  = data?.alias || "";
+    const listaContainer = document.getElementById('mirth_list');
+    const addCard        = listaContainer.querySelector('.add-card');
+    const id             = Date.now();
+    const aliasVal       = data?.alias || "";
+    const tituloInicial  = aliasVal || "Servidor nuevo";
 
-    const html = `
-    <div class="card p-3 mb-3 border bg-light mirth-card" id="mirth_${id}">
-        <div class="d-flex justify-content-between mb-2">
-            <h6 class="fw-bold text-success mb-0"><i class="fas fa-server me-2"></i>Mirth: ${aliasVal || "Nuevo"}</h6>
-            <button class="btn btn-sm btn-outline-danger" onclick="document.getElementById('mirth_${id}').remove()">
-                <i class="fas fa-trash"></i> Quitar
-            </button>
-        </div>
-        <div class="row g-2">
-            <div class="col-md-3">
-                <label class="form-label text-muted small fw-bold">Alias / Entorno</label>
-                <input type="text" class="form-control mirth-alias border-success" placeholder="Ej: Produccion_Principal" value="${aliasVal}">
-            </div>
-            <div class="col-md-4">
-                <label class="form-label text-muted small fw-bold">URL API (HTTPS)</label>
-                <input type="text" class="form-control mirth-url" placeholder="https://192.168.x.x:8443" value="${data?.url || ''}">
-            </div>
-            <div class="col-md-2">
-                <label class="form-label text-muted small fw-bold">Usuario</label>
-                <input type="text" class="form-control mirth-user" placeholder="admin" value="${data?.user || ''}">
-            </div>
-            <div class="col-md-3">
-                <label class="form-label text-muted small fw-bold">Contraseña</label>
-                <div class="input-group">
-                    <input type="password" class="form-control mirth-pass" value="${data?.pass || ''}">
-                    <button class="btn btn-warning text-white" onclick="testMirth(this)"><i class="fas fa-plug"></i></button>
+    const cardHtml = `
+    <div class="modulo-card" id="mirth_card_${id}" data-modal-id="mirth_modal_${id}"
+         onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('mirth_modal_${id}')).show()">
+        <i class="fas fa-server fa-lg text-success mb-1"></i>
+        <span class="modulo-titulo">${escapeHtml(tituloInicial)}</span>
+    </div>`;
+    addCard.insertAdjacentHTML('beforebegin', cardHtml);
+
+    const modalHtml = `
+    <div class="modal fade" id="mirth_modal_${id}" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-server me-2"></i>Mirth: <span class="mirth-modal-titulo">${escapeHtml(tituloInicial)}</span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body mirth-card" id="mirth_${id}">
+                    <div class="row g-2">
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Alias / Entorno</label>
+                            <input type="text" class="form-control mirth-alias border-success" placeholder="Ej: Produccion_Principal"
+                                   value="${aliasVal}" oninput="_actualizarTituloMirth('${id}')">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small fw-bold">URL API (HTTPS)</label>
+                            <input type="text" class="form-control mirth-url" placeholder="https://192.168.x.x:8443" value="${data?.url || ''}">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label text-muted small fw-bold">Usuario</label>
+                            <input type="text" class="form-control mirth-user" placeholder="admin" value="${data?.user || ''}">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Contraseña</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control mirth-pass" value="${data?.pass || ''}">
+                                <button class="btn btn-warning text-white" onclick="testMirth(this)"><i class="fas fa-plug"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarMirth('${id}')">
+                        <i class="fas fa-trash me-1"></i>Quitar servidor
+                    </button>
                 </div>
             </div>
         </div>
     </div>`;
-    container.insertAdjacentHTML('beforeend', html);
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    if (!data) {
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('mirth_modal_' + id)).show();
+    }
+}
+
+function _actualizarTituloMirth(id) {
+    const alias  = document.getElementById('mirth_' + id).querySelector('.mirth-alias').value.trim();
+    const titulo = alias || 'Servidor nuevo';
+    const cardEl = document.getElementById('mirth_card_' + id);
+    if (cardEl) cardEl.querySelector('.modulo-titulo').textContent = titulo;
+    const modalTituloEl = document.getElementById('mirth_modal_' + id)?.querySelector('.mirth-modal-titulo');
+    if (modalTituloEl) modalTituloEl.textContent = titulo;
+}
+
+function quitarMirth(id) {
+    if (!confirm('¿Quitar este servidor Mirth de la lista?')) return;
+    bootstrap.Modal.getInstance(document.getElementById('mirth_modal_' + id))?.hide();
+    document.getElementById('mirth_card_' + id)?.remove();
+    document.getElementById('mirth_modal_' + id)?.remove();
 }
 
 async function testMirth(btnElement) {

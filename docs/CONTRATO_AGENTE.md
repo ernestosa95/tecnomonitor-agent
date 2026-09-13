@@ -197,6 +197,12 @@ datos están obsoletos) — se manda en **cada** ciclo periódico cuando el mód
 como pide el contrato de ingesta (§7.4 de ese documento: el detector necesita varios puntos en
 el tiempo, no solo cuando cambia).
 
+Desde v4.6 el agente puede armar esta lista leyendo directo de SQL Server o vía ElasticSearch
+(indistinto para el servidor, la forma es idéntica) — la única diferencia es
+`snapshot_age_minutes`, que no está en el ejemplo de arriba: viaja en `0.0` si el agente leyó
+directo de SQL (no hay lag de pipeline que medir), o con la antigüedad real del documento si
+leyó de Elastic.
+
 ## 8. `collection_meta` — clave que el agente manda y no está en el contrato de ingesta
 
 ```json

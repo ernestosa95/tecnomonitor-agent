@@ -4,6 +4,11 @@ Todos los módulos se orquestan desde `agent_logic.ejecutar_ciclo_agente()`. Cad
 independiente: si un módulo falla, se registra el error en `collection_meta.<modulo>` y el
 ciclo continúa con el resto (no aborta el envío completo por un módulo caído).
 
+Los dos módulos que leen datos de la base del hospital (SQL Server y autoenrute DICOM, más
+abajo) siguen un principio de diseño explícito: **SQL directo y ElasticSearch conviven siempre
+como caminos alternativos, nunca uno reemplaza al otro** — ver
+[ARQUITECTURA.md](./ARQUITECTURA.md#principio-de-diseño-sql-directo--elasticsearch-siempre-los-dos-caminos).
+
 ## Proxmox / VMware
 
 **Habilitación:** `enabled_proxmox` + `proxmox.*` · **Función:** `obtener_physical_layer` (Proxmox) / `obtener_vmware_layer` (VMware)
@@ -209,12 +214,31 @@ Clasificación semafórica por días restantes hasta `not_valid_after`:
 7. El checkpoint se actualiza al timestamp del log más reciente visto, y —al igual que en
    SQL— **solo se persiste tras la confirmación de envío exitoso**.
 
-## Autoenrute DICOM (vía ElasticSearch)
+## Autoenrute DICOM (SQL directo o vía ElasticSearch)
 
-**Habilitación:** `enabled_elastic` + `elastic.enabled_dicom_routing` (con fallback legacy a
-`sql.enabled_dicom_routing`, ver [CONFIGURACION.md](./CONFIGURACION.md)) · **Función:** `get_dicom_routing_queues`
+**Habilitación:** `enabled_sql` + `sql.enabled_dicom_routing` (directo, v4.6) **o**
+`enabled_elastic` + `elastic.enabled_dicom_routing` (Elastic gana si ambos están activos) ·
+**Funciones:** `obtener_dicom_routing_sql` / `get_dicom_routing_queues`, despachadas desde
+`ejecutar_ciclo_agente` §5.5 — mismo criterio de prioridad que los KPIs de negocio (ver
+[SQL Server (KPIs de negocio)](#sql-server-kpis-de-negocio) más abajo: si ambos caminos están
+configurados, gana la variante Elastic).
 
-No lee SQL Server directo (a diferencia de antes de v4.4): lee un índice de Elasticsearch
+Corre en **cada ciclo** del intervalo global (a diferencia de los KPIs de negocio, que respetan
+su propia ventana de `executions_per_day`) — es una foto del estado actual de las reglas, no
+una serie histórica con checkpoint.
+
+### Directo a SQL Server (`obtener_dicom_routing_sql`, v4.6)
+
+Restaura el camino que existía hasta v4.3 (entre v4.4 y v4.5 solo existía vía Elastic — ver
+[CONFIGURACION.md](./CONFIGURACION.md#autoenrute-dicom-dos-caminos-independientes-historia-del-flag)
+para el porqué). Misma query confirmada en producción que usa `elk/ext_dicom_queues.conf` para
+poblar el índice de Elastic (`DICOMAUTOROUTINGRULES` + `DICOMCLIENT` + `DICOMAUTOROUTINGQUEUE`
+de `ExtensaPACS`), pero sin el pipeline de Logstash intermedio: el dato es siempre en vivo.
+`snapshot_age_minutes` viaja en `0.0` en cada regla — no hay lag que medir.
+
+### Vía ElasticSearch (`get_dicom_routing_queues`)
+
+Lee un índice de Elasticsearch
 (`dicom_index`, default `ext_dicom_queues`) que un pipeline de Logstash actualiza cada 5
 minutos con upsert por `IDRULE` — es una "foto" del último ciclo del pipeline, no un stream de
 eventos.

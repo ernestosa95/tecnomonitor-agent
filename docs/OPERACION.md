@@ -103,10 +103,17 @@ criterio que el servicio de no parsear texto de `schtasks.exe`.
 
 ## Checkpoints
 
+Desde v4.6 (soporte multi-hospital, ver [PLAN_MEJORAS_V4.5.md §9.1](./PLAN_MEJORAS_V4.5.md#91-un-agente-múltiples-sistemas-monitoreados-en-la-misma-red)),
+cada hospital tiene su propio archivo, con el `hospital_id` como sufijo:
+
 | Archivo | Qué controla | Cómo resetearlo |
 |---|---|---|
-| `.sql_checkpoint` | Hasta dónde se extrajeron los KPIs de negocio | Botón "Resetear historial SQL" en la GUI (`reset_historial_sql`), o borrar el archivo manualmente con el servicio detenido |
-| `.elastic_checkpoint` | Hasta qué timestamp se procesaron logs de Elastic | Borrar el archivo manualmente con el servicio detenido (no tiene botón dedicado en la GUI) |
+| `.sql_checkpoint_<hospital_id>` | Hasta dónde se extrajeron los KPIs de negocio de ese hospital | Botón "Resetear historial SQL" en la tarjeta SQL de ese hospital (`reset_historial_sql`), o borrar el archivo manualmente con el servicio detenido |
+| `.elastic_checkpoint_<hospital_id>` | Hasta qué timestamp se procesaron logs de Elastic de ese hospital | Borrar el archivo manualmente con el servicio detenido (no tiene botón dedicado en la GUI) |
+
+Una instalación migrada desde antes de v4.6 (un solo hospital) renombra sus archivos viejos
+(`.sql_checkpoint`, sin sufijo) al nuevo nombre automáticamente la primera vez que ese hospital
+los necesita — no se pierde el historial por la migración.
 
 **Resetear el checkpoint SQL fuerza un backfill histórico completo** desde
 `sql.historical_start_date` en el próximo ciclo, procesando un bloque (`24/executions_per_day`
@@ -115,6 +122,27 @@ grande. La GUI ya advierte esto en el diálogo de confirmación.
 
 Ambos checkpoints se escriben de forma atómica (`.tmp` + `os.replace`) y solo después de que el
 POST al servidor central confirme éxito — ver [ENVELOPE_API.md](./ENVELOPE_API.md).
+
+## Diagnóstico de conectividad (`--selftest`)
+
+```
+TecnoMonitorService.exe --selftest
+```
+
+Prueba la conectividad de cada hospital configurado y de cada módulo habilitado (central,
+hipervisor, iDRAC, equipos WMI/SSH, Mirth, SSL, Elastic), reutilizando las mismas funciones
+`test_connection_*` que ya usan los botones "Test" de la GUI. No manda ningún reporte real al
+servidor central (no genera ruido en el dashboard) y no toma el candado de instancia única —
+puede correrse con el servicio real corriendo en paralelo. Útil para que un técnico en sitio
+diagnostique una instalación nueva, o confirme qué integración está fallando después de un
+cambio de red/credenciales, sin tener que interpretar `activity.log` en vivo.
+
+También existe "Enviar ahora" en la GUI (dentro del detalle de cada hospital): a diferencia de
+`--selftest`, ese sí manda un reporte real con lo que hay escrito en el formulario en ese
+momento (sin necesidad de guardar antes) — pensado para confirmar que un hospital recién
+agregado o editado efectivamente llega al servidor, no solo que las credenciales conectan. No
+incluye KPIs de negocio (SQL/Elastic): esa extracción tiene su propio checkpoint compartido con
+el ciclo normal del servicio.
 
 ## Diagnóstico de disco (`debug_disk.py`)
 

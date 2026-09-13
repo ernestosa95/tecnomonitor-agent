@@ -1,5 +1,43 @@
 # Arquitectura
 
+## Principio de diseño: SQL directo + ElasticSearch, siempre los dos caminos
+
+**Toda métrica que dependa de datos de la base de datos del hospital (Extensa RIS/PACS) se
+implementa con dos caminos habilitados, no uno solo:**
+
+1. **Directo a SQL Server** — conexión `pyodbc` del propio agente, sin depender de nada externo
+   instalado en el hospital.
+2. **Vía ElasticSearch** — un pipeline de Logstash (fuera del agente, ver `elk/`) publica los
+   mismos datos a un índice, y el agente los lee de ahí en vez de conectar a SQL directo.
+
+Ninguno de los dos es "el nuevo" que reemplaza al otro — **conviven permanentemente**. Decisión
+explícita (2026-09-12): no todos los hospitales van a tener siempre la posibilidad de correr un
+clúster de Elastic; el camino directo a SQL tiene que seguir existiendo como opción real, no
+como compatibilidad legacy a punto de eliminarse. Cuando ambos caminos están configurados a la
+vez para la misma métrica, gana Elastic (mismo criterio en los dos ejemplos ya implementados) —
+pero un hospital sin Elastic tiene que poder prender solo el camino SQL y tener la métrica
+funcionando igual, sin ninguna pérdida de funcionalidad.
+
+**Precedente que rompió esta regla una vez, y no debería repetirse:** el autoenrute DICOM pasó
+por un período (v4.4–v4.5) donde el camino SQL directo se eliminó por completo en vez de
+quedar como alternativa, dejando sin ese monitoreo a cualquier hospital sin Elastic. Se
+restauró en v4.6 — ver
+[PLAN_MEJORAS_V4.5.md §1.7](./PLAN_MEJORAS_V4.5.md#17--resuelto-autoenrute-dicom-había-quedado-con-un-solo-camino-posible-solo-elastic).
+
+**Ejemplos ya implementados de este patrón** (ver [MODULOS.md](./MODULOS.md) para el detalle de
+cada uno):
+
+| Métrica | Directo a SQL | Vía Elastic |
+|---|---|---|
+| KPIs de negocio (RIS/PACS/usuarios) | `extraer_metricas_sql` | `extraer_metricas_ris_elastic` |
+| Autoenrute DICOM | `obtener_dicom_routing_sql` | `get_dicom_routing_queues` |
+
+**Al agregar una métrica nueva que lea de la base de datos del hospital, implementar los dos
+caminos desde el arranque** (no como una fase 2 a futuro) — reusar el patrón de conexión
+`pyodbc` ya establecido en `extraer_metricas_sql`/`obtener_dicom_routing_sql` para el lado SQL,
+y coordinar con quien administra el ELK del hospital para el lado Elastic (ver
+[ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md)).
+
 ## Visión general
 
 ```

@@ -210,6 +210,32 @@ según ese mismo contrato), lo más probable es que hoy se guarde sin usarse.
   "módulo activo sin datos" de "módulo con error" en el dashboard — el agente ya manda esa
   distinción hecha, no haría falta inferirla de otra forma del lado servidor.
 
+### 1.7 ✅ RESUELTO — Autoenrute DICOM había quedado con un solo camino posible (solo Elastic)
+
+Al revisar la asimetría entre módulos (los KPIs de negocio siempre tuvieron SQL directo +
+Elastic como alternativas, ver §5 más abajo) se confirmó que el autoenrute DICOM no seguía el
+mismo criterio: entre v4.4 y v4.5 el colector pasó a leer **únicamente** de ElasticSearch, sin
+ningún camino directo a SQL Server — a pesar de que el propio código ya documentaba que hasta
+v4.3 sí existía ("Compatibilidad de configuración v4.3 -> v4.4" en `_dicom_routing_habilitado`).
+Un hospital sin Elastic/Logstash configurado simplemente no podía tener este monitoreo.
+
+**Estado:** se agregó `obtener_dicom_routing_sql()`, con la misma query ya confirmada en
+producción que usa `elk/ext_dicom_queues.conf` para poblar el índice de Elastic, corriendo
+directo contra SQL Server sin depender de ningún pipeline intermedio. Mismo criterio de
+prioridad que los KPIs de negocio: si `sql.enabled_dicom_routing` y
+`elastic.enabled_dicom_routing` están activos a la vez, gana Elastic. **Corre en cada ciclo del
+intervalo global**, no en el bloque de extracción de KPIs — no tiene checkpoint ni ventana, es
+una foto del estado actual de las reglas (aclaración pedida explícitamente al implementarlo:
+no confundir esto con la cadencia de `executions_per_day` de los KPIs). Ver
+[CONFIGURACION.md](./CONFIGURACION.md#autoenrute-dicom-dos-caminos-independientes-historia-del-flag)
+y [MODULOS.md](./MODULOS.md#autoenrute-dicom-sql-directo-o-vía-elasticsearch) para el detalle.
+
+**Esto dejó de ser un caso puntual y pasó a ser política de diseño permanente** (decisión
+explícita, 2026-09-12): toda métrica nueva que dependa de la base de datos del hospital se
+implementa desde el arranque con los dos caminos habilitados, no como una fase 2 — ver
+[ARQUITECTURA.md § Principio de diseño](./ARQUITECTURA.md#principio-de-diseño-sql-directo--elasticsearch-siempre-los-dos-caminos)
+para la regla completa y por qué existe (no todos los hospitales van a tener siempre Elastic).
+
 ---
 
 ## 2. ✅ HECHO — Preparación para autenticación obligatoria (`schema_version 4.5`)
@@ -265,7 +291,11 @@ GUI. La mecánica de transporte ya existe; lo que falta es el **cambio de gobier
    `_schema_version_efectiva()` usa su contenido en vez de la versión normal — crear ese archivo
    con `"4.3"` adentro fuerza el rollback sin recompilar; borrarlo vuelve al comportamiento
    normal. `agent_version`/`schema_version` ahora también salen de una única fuente
-   (`AGENT_VERSION`/`SCHEMA_VERSION`, leídas de `/VERSION` — ver §6).
+   (`AGENT_VERSION`/`SCHEMA_VERSION`, leídas de `/VERSION` — ver §6). **Corrección posterior:**
+   el override no dejaba rastro en el log — si alguien lo creaba para un rollback puntual y se
+   olvidaba de borrarlo, el hospital quedaba permanentemente en `"4.3"` sin ninguna señal. Ahora
+   `_schema_version_efectiva()` loguea una advertencia explícita en **cada ciclo** mientras el
+   archivo exista, no solo la primera vez que se detecta.
 
 Este punto no es "código a escribir" tanto como **gobierno de release**: la parte técnica ya
 está resuelta (envío del Bearer token), lo que falta es el proceso de corte coordinado.
@@ -313,7 +343,10 @@ configs existentes). `_esquema_elastic()` centraliza la decisión y se usa en lo
 `agent_logic.py` que arman una URL de Elastic. Se agregó `verify=False` a esos mismos requests
 (mismo criterio ya aceptado para iDRAC/central, necesario porque el caso típico es un
 certificado autofirmado del propio clúster interno del hospital, no uno de una CA pública) —
-ver §3.4, que sigue como el ítem general de fondo sobre `verify=False`.
+ver §3.4, que sigue como el ítem general de fondo sobre `verify=False`. **Corrección
+posterior:** faltaba la otra mitad de este ítem — avisar cuando sigue en HTTP plano. Ahora
+`ejecutar_ciclo_agente` loguea una advertencia explícita en cada ciclo si el módulo Elastic está
+activo y `use_https` sigue apagado, en vez de dejarlo como un riesgo silencioso.
 
 ### 3.4 `verify=False` generalizado (medio)
 Evaluar, por integración, si tiene sentido ofrecer una opción de CA propia/pinning en vez de
@@ -723,3 +756,29 @@ Nueva función en `agent_logic.py`, hermana de `_recolectar_wmi_interno`, produc
 
 No es un ítem de la lista de v4.5 — queda como diseño de referencia para cuando se priorice
 implementarlo.
+
+### 9.3 Mejoras agregadas en una revisión posterior (no eran pedidos originales)
+
+Surgieron de una autorevisión rápida del código de esta sesión (multi-hospital, pywebview,
+SSH/Linux, lote de robustez/seguridad), buscando bugs de correctitud — no se encontró nada que
+rompa producción, pero sí un par de huecos y algunas mejoras que valía la pena sumar mientras se
+estaba ahí:
+
+- **Suite de tests en `tests/`** (`pytest`) — el testing de todo lo anterior había sido ad-hoc
+  (scripts sueltos, corridos a mano), sin quedar nada en el repo para detectar una regresión a
+  futuro. Ver [BUILD.md#tests](./BUILD.md#tests).
+- **Versión del agente visible en el header de la GUI** (`estado_acceso_gui` ahora incluye
+  `agent_version`) — con varios hospitales corriendo versiones distintas en paralelo, ayuda a
+  soporte confirmar de un vistazo qué versión está mirando en una captura de pantalla.
+- **Botón "Enviar ahora" por hospital** (`Api.enviar_ahora_gui` → `agent_logic.ejecutar_ciclo_agente`
+  directo, sin pasar por el checkpoint de KPIs de negocio) — manda lo que hay escrito en el
+  formulario en ese momento, sin necesidad de guardar antes, para validar un hospital recién
+  agregado o editado sin esperar el intervalo global.
+- **Modo `--selftest`** (`headless_service.py`) — prueba conectividad de cada hospital/módulo
+  reutilizando las funciones `test_connection_*` que ya usan los botones de la GUI, sin mandar
+  ningún reporte real. Ver [OPERACION.md#diagnóstico-de-conectividad-selftest](./OPERACION.md#diagnóstico-de-conectividad-selftest).
+
+Dos correcciones a ítems ya marcados resueltos antes (ver §2 punto 5 y §3.3 más arriba, sección
+de "Corrección posterior"): el rollback de `schema_version` no dejaba rastro en el log, y la
+advertencia de Elastic en HTTP plano nunca se había implementado (solo el toggle para
+desactivarlo).

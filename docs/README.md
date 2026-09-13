@@ -21,6 +21,7 @@ no incluye cambios ni propuestas de código, solo documentación de referencia.
 | [CHANGELOG.md](./CHANGELOG.md) | Historial de versiones reconstruido a partir de comentarios en el código |
 | [PLAN_MEJORAS_V4.5.md](./PLAN_MEJORAS_V4.5.md) | Plan de mejoras para v4.5: bugs de paridad con el contrato del servidor, seguridad, robustez, performance y secuencia de release |
 | [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md) | Migración de KPIs de RIS de SQL directo a ElasticSearch (Logstash), mismo patrón que el autoenrute DICOM |
+| `tests/` (ver [BUILD.md#tests](./BUILD.md#tests)) | Suite de `pytest`: migración de config, gate de sesión, recolección SSH, ciclo multi-hospital, robustez/seguridad |
 
 ## Resumen de una línea
 

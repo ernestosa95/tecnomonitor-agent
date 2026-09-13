@@ -70,7 +70,7 @@ Ver [MODULOS.md](./MODULOS.md#proxmox--vmware) para qué se recolecta según el 
 | `sql.pass` | string 🔒 | — | Contraseña |
 | `sql.executions_per_day` | int | `3` | Cuántos bloques por día se extraen (define `interval_hours = 24 / executions_per_day`); si es `<= 0` se fuerza a `3` |
 | `sql.historical_start_date` | string `YYYY-MM-DD` | — | Fecha desde la que arrancar el backfill histórico si no hay checkpoint previo. Si falta o es inválida, se usa el inicio del día actual |
-| `sql.enabled_dicom_routing` | bool | — | **Obsoleto desde v4.4** (ver más abajo) |
+| `sql.enabled_dicom_routing` | bool | `false` | **v4.6** — habilita el autoenrute DICOM directo a SQL Server (ver [§ ElasticSearch](#elasticsearch-logs--autoenrute-dicom--kpis-de-ris--enabled_elastic--elastic) más abajo para la variante vía Elastic y la prioridad entre ambas). A diferencia del resto de esta tarjeta, corre en **cada ciclo** del intervalo global, no en el bloque de KPIs de negocio — no tiene checkpoint ni ventana, es una foto del estado actual de las reglas |
 
 Detalle de la extracción (checkpoint, backfill, bloques) en [MODULOS.md](./MODULOS.md#sql-server-kpis-de-negocio).
 
@@ -120,7 +120,7 @@ cantidad de file descriptors abiertos del proceso, no el mismo concepto que en W
 | `elastic.user` | string | — | Usuario (Basic Auth) |
 | `elastic.pass` | string 🔒 | — | Contraseña |
 | `elastic.index_pattern` | string | `"se-es-logging-*"` | Patrón de índices para el módulo de logs de Suitestensa |
-| `elastic.enabled_dicom_routing` | bool | `false` | Habilita el sub-módulo de autoenrute DICOM (ver más abajo) |
+| `elastic.enabled_dicom_routing` | bool | `false` | Habilita el sub-módulo de autoenrute DICOM vía Elastic (ver más abajo). Si `sql.enabled_dicom_routing` **también** está activo, este camino tiene prioridad (mismo criterio que `enabled_ris_metrics` sobre `enabled_sql`) |
 | `elastic.dicom_index` | string | `"ext_dicom_queues"` | Índice donde Logstash publica el estado de las colas de autoenrute |
 | `elastic.dicom_max_age_minutes` | int | `15` | Antigüedad máxima aceptada de un documento del índice de autoenrute antes de considerarlo obsoleto |
 | `elastic.enabled_ris_metrics` | bool | `false` | **v4.5** — habilita la extracción de KPIs de RIS/PACS/usuarios vía Elastic en vez de SQL directo (ver [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md)). Convive con `enabled_sql`: si está en `true` y `elastic.host` está configurado, tiene prioridad sobre el módulo SQL directo para ese hospital |
@@ -137,16 +137,22 @@ cantidad de file descriptors abiertos del proceso, no el mismo concepto que en W
 > (default `9200`), pero es relevante si se edita `monitor_config.json` a mano o se omite el
 > campo.
 
-### Compatibilidad del flag de autoenrute DICOM (v4.3 → v4.4)
+### Autoenrute DICOM: dos caminos independientes (historia del flag)
 
-Hasta la v4.3, el flag vivía en `sql.enabled_dicom_routing` (el colector leía SQL Server
-directo). Desde v4.4 el autoenrute se lee de ElasticSearch y el flag se movió a
-`elastic.enabled_dicom_routing`. Tanto el backend (`_dicom_routing_habilitado` en
-`agent_logic.py`) como el frontend (`cargarConfiguracion` en `script.js`) tienen un fallback:
-si `elastic.enabled_dicom_routing` no está presente, se usa el valor viejo de
-`sql.enabled_dicom_routing`. Esto evita que agentes ya desplegados con la configuración vieja
-dejen de reportar en silencio hasta que alguien reguarde la configuración. Se puede retirar
-este fallback una vez que todos los hospitales estén confirmados en v4.4 o superior.
+Hasta v4.3 el colector leía las reglas de autoenrute directo de SQL Server
+(`sql.enabled_dicom_routing`). Entre v4.4 y v4.5 ese camino se reemplazó por completo por
+ElasticSearch (`elastic.enabled_dicom_routing`) — el flag de SQL quedó sin ningún colector
+detrás. **Desde v4.6 el camino directo a SQL se restauró como alternativa real** (no como
+compatibilidad hacia atrás): mismo criterio que los KPIs de negocio (`enabled_sql` vs.
+`elastic.enabled_ris_metrics`), donde ambos son válidos y Elastic gana si los dos están
+activos a la vez. Ver `_dicom_routing_habilitado` y la sección 5.5 de
+`ejecutar_ciclo_agente` en `agent_logic.py`, y
+[PLAN_MEJORAS_V4.5.md §1](./PLAN_MEJORAS_V4.5.md) para el detalle de la decisión.
+
+La única diferencia de forma entre ambos caminos: `snapshot_age_minutes` en cada regla viaja
+siempre en `0.0` cuando se lee directo de SQL (no hay lag de pipeline de Logstash que medir —
+el dato es la foto actual de la base), mientras que vía Elastic refleja la antigüedad real del
+documento indexado.
 
 ### KPIs de RIS vía Elastic — coexistencia con `enabled_sql` (v4.5)
 

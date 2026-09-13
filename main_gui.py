@@ -85,9 +85,15 @@ class Api:
         """
         El frontend la llama al cargar la página, antes de que el admin
         escriba nada. Si _codigo_nuevo está poblado, es la única vez que se
-        muestra.
+        muestra. Incluye la versión del agente (no es información sensible)
+        para que quede visible en el header — útil para soporte cuando hay
+        varios hospitales corriendo versiones distintas en paralelo.
         """
-        return {"primera_vez": self._codigo_nuevo is not None, "codigo": self._codigo_nuevo}
+        return {
+            "primera_vez": self._codigo_nuevo is not None,
+            "codigo": self._codigo_nuevo,
+            "agent_version": agent_logic.AGENT_VERSION,
+        }
 
     def verificar_clave(self, clave_ingresada: str) -> dict:
         """El frontend envía el código; Python compara el hash. Nunca viaja el código guardado."""
@@ -174,6 +180,27 @@ class Api:
 
         except Exception as e:
             return {"success": False, "msg": str(e)}
+
+    @_requiere_sesion
+    def enviar_ahora_gui(self, perfil: dict):
+        """
+        Dispara un ciclo inmediato para el perfil tal como está en el
+        formulario — no lee de disco ni requiere haber guardado antes, para
+        poder validar un hospital recién agregado/editado sin esperar el
+        intervalo global ni reiniciar el servicio.
+
+        No incluye application_metrics (KPIs de negocio): esa extracción
+        vive en headless_service.ejecutar_un_ciclo, upstream de
+        ejecutar_ciclo_agente, y no se dispara desde acá — correrla en
+        paralelo con el ciclo real del servicio arriesgaría pisar su
+        checkpoint. Sí corre (y persiste su propio checkpoint) la lectura de
+        logs de Suitestensa si el módulo Elastic está activo; una carrera
+        ahí es un riesgo menor aceptado, no un problema de datos clínicos.
+        """
+        try:
+            return agent_logic.ejecutar_ciclo_agente(perfil)
+        except Exception as e:
+            return {"status": "Error", "error": str(e)}
 
     # -----------------------------------------------------------------
     # CONTROL DEL SERVICIO

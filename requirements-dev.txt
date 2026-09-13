@@ -1,0 +1,3 @@
+# Dependencias solo para desarrollo/tests (no se empaquetan en el agente).
+# Correr la suite: pip install -r requirements.txt -r requirements-dev.txt && pytest
+pytest

@@ -43,10 +43,28 @@ Comandos modo Tarea Programada (v4.5.0, ver task_control.py):
     TecnoMonitorService.exe install-task
     TecnoMonitorService.exe remove-task
     TecnoMonitorService.exe --run-once   (un solo ciclo — esto es lo que dispara la tarea)
+
+Diagnóstico (v4.6, no requiere detener el servicio):
+    TecnoMonitorService.exe --selftest   (prueba conectividad de cada hospital/módulo
+                                           configurado, sin mandar ningún reporte real)
 """
 
 import sys
 import os
+
+# --- --selftest necesita una consola real ---
+# El ejecutable se compila --noconsole (obligatorio para el servicio), así
+# que Windows nunca le asigna una consola — sys.stdout/stderr son None
+# incluso si se lo corre a mano desde una ventana de cmd real. Sin esto,
+# --selftest no imprimiría nada visible. AttachConsole(-1) se adjunta a la
+# consola del proceso que lo invocó (ATTACH_PARENT_PROCESS); si falla (ej.
+# se lo abrió con doble clic, sin consola alrededor), se sigue de largo y
+# cae en el fallback de --noconsole de abajo, igual que siempre.
+if len(sys.argv) > 1 and sys.argv[1] == '--selftest' and sys.platform == 'win32':
+    import ctypes
+    if ctypes.windll.kernel32.AttachConsole(-1):
+        sys.stdout = open('CONOUT$', 'w')
+        sys.stderr = open('CONOUT$', 'w')
 
 # --- FIX CRÍTICO PARA MODO --noconsole ---
 # En un servicio no hay consola adjunta: sys.stdout/stderr son None y
@@ -62,6 +80,7 @@ import json
 import socket
 import logging
 import traceback
+import requests
 from logging.handlers import RotatingFileHandler
 
 import win32event
@@ -536,6 +555,65 @@ if __name__ == '__main__':
         finally:
             liberar_candado()
             log("👋 Ciclo de tarea programada finalizado.\n")
+
+    elif sys.argv[1] == '--selftest':
+        # Diagnóstico manual para un técnico en sitio: prueba conectividad
+        # de cada hospital configurado y de cada módulo habilitado,
+        # reutilizando las mismas funciones test_connection_* que ya usan
+        # los botones "Test" de la GUI — no manda ningún reporte real al
+        # servidor central (no genera ruido), y no toma el candado de
+        # instancia única: puede correr en paralelo con el servicio real.
+        print("=== TecnoMonitor Agent — self-test ===")
+
+        cfg = cargar_config_segura()
+        if not cfg or not cfg.get("instalaciones"):
+            print("[FALLO] No se pudo cargar monitor_config.json, o no tiene hospitales configurados.")
+            sys.exit(1)
+
+        for perfil in cfg["instalaciones"]:
+            hid = perfil.get("hospital_id", "?")
+            print(f"\n--- Hospital: {hid} (enabled={perfil.get('enabled', True)}) ---")
+
+            central_url = perfil.get("central_url")
+            try:
+                r = requests.get(central_url, timeout=5, verify=False)
+                print(f"[OK]    Central ({central_url}): HTTP {r.status_code}")
+            except Exception as e:
+                print(f"[FALLO] Central ({central_url}): {e}")
+
+            if perfil.get("enabled_proxmox"):
+                hyper_cfg = perfil.get("proxmox", {})
+                fn = agent_logic.test_connection_vmware if hyper_cfg.get("type") == "vmware" else agent_logic.test_connection_proxmox
+                res = fn(hyper_cfg)
+                print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} Hipervisor: {res.get('msg')}")
+
+            if perfil.get("enabled_idrac"):
+                res = agent_logic.test_connection_idrac(perfil.get("idrac", {}))
+                print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} iDRAC: {res.get('msg')}")
+
+            for vm in perfil.get("vms", []):
+                fn = agent_logic.test_connection_vm_ssh if vm.get("os") == "linux" else agent_logic.test_connection_vm_wmi
+                res = fn(vm)
+                print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} Equipo {vm.get('ip')} ({vm.get('os', 'windows')}): {res.get('msg')}")
+
+            if perfil.get("enabled_sql") and perfil.get("sql", {}).get("host"):
+                print("[INFO]  SQL: sin test de conectividad dedicado todavía (ver agent_logic.extraer_metricas_sql).")
+
+            if perfil.get("enabled_mirth"):
+                for m in perfil.get("mirth_servers", []):
+                    res = agent_logic.test_connection_mirth(m)
+                    print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} Mirth ({m.get('alias')}): {res.get('msg')}")
+
+            if perfil.get("enabled_ssl"):
+                for url_obj in perfil.get("ssl_urls", []):
+                    res = agent_logic.test_ssl_gui(url_obj)
+                    print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} SSL ({url_obj.get('url')}): {res.get('msg')}")
+
+            if perfil.get("enabled_elastic") and perfil.get("elastic", {}).get("host"):
+                res = agent_logic.test_connection_elastic(perfil.get("elastic", {}))
+                print(f"{'[OK]   ' if res.get('success') else '[FALLO]'} Elastic: {res.get('msg')}")
+
+        print("\n=== Fin del self-test ===")
 
     elif sys.argv[1] == 'install-task':
         # Invocado desde TecnoMonitor.iss cuando se elige modo Tarea en el

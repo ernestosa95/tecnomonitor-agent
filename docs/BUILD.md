@@ -63,7 +63,8 @@ no la librería `proxmoxer`). Se mantiene en el repo como nota histórica/borrad
 
 | Paquete | Usado por | Notas |
 |---|---|---|
-| `eel` | `main_gui.py` | Bridge Python↔JS de la GUI |
+| `pywebview` | `main_gui.py` | Bridge Python↔JS de la GUI (v4.6, reemplaza a `eel`) |
+| `paramiko` | `agent_logic.py` (módulo SSH, equipos Linux) | v4.6 — ver [PLAN_MEJORAS_V4.5.md §9.2](./PLAN_MEJORAS_V4.5.md#92-monitoreo-de-equipos-linux-en-vms-hoy-solo-wmiwindows) |
 | `requests`, `urllib3` | prácticamente todos los módulos de red | `urllib3.disable_warnings(InsecureRequestWarning)` global, ver [SEGURIDAD.md](./SEGURIDAD.md) |
 | `wmi`, `pythoncom` | `agent_logic.py` (módulo WMI) | Requiere Windows; `pywin32` provee `pythoncom` |
 | `pyodbc` | `agent_logic.py` (módulo SQL) | Requiere driver ODBC de SQL Server instalado en el equipo (`ODBC Driver 17` con fallback a `SQL Server`) |
@@ -72,16 +73,40 @@ no la librería `proxmoxer`). Se mantiene en el repo como nota histórica/borrad
 | `pyVmomi` | `agent_logic.py` (módulo VMware) | **Import diferido** dentro de la función — si no está instalado, el módulo lo reporta como error controlado en vez de romper el arranque del agente completo |
 | `pywin32` (`win32service`, `win32serviceutil`, `win32event`, `win32api`, `winerror`, `servicemanager`, `win32timezone`) | `headless_service.py`, `service_control.py` | Núcleo de la integración con el SCM de Windows |
 
-No hay un `requirements.txt` en el repositorio: las dependencias se infieren de los imports.
-Antes de compilar en un entorno nuevo, instalar manualmente los paquetes de la tabla (más
-`pyVmomi` si se va a soportar VMware) y correr `pywin32_postinstall.py -install` según indica
-el propio `build.bat` en su verificación inicial.
+Desde v4.6 estas dependencias están formalizadas en `requirements.txt` (con marcadores
+`sys_platform == "win32"` para las que no aplican en un entorno de desarrollo no-Windows) — ya
+no hace falta inferirlas de los imports a mano. `requirements-dev.txt` agrega `pytest`, solo
+para correr la suite de `tests/` (ver más abajo), nunca se empaqueta en el agente.
+
+## Tests
+
+```
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
+
+La suite (`tests/`) corre en cualquier plataforma: `tests/conftest.py` stubea los módulos
+Windows-only (`wmi`, `pythoncom`, `pywin32`) antes de importar `agent_logic`/`main_gui`/
+`headless_service`, así que no hace falta Windows ni una instalación real de WMI/SQL
+Server/iDRAC/Elastic para correrla — todo lo que toca una integración externa está mockeado a
+nivel de objeto (`paramiko.SSHClient`, `requests.post`, etc.), no del protocolo de red en sí.
+Cubre: migración de `monitor_config.json` y cifrado de credenciales, el gate de sesión de la
+GUI, la recolección SSH de equipos Linux, el aislamiento de fallas del ciclo multi-hospital, y
+el lote de robustez/seguridad (401, rollback de `schema_version`, HTTPS opcional de Elastic,
+integridad de `rules.json`, tope de paginación).
+
+**Lo que la suite NO cubre** (requiere un entorno real, no un mock): el render de la GUI en
+WebView2/Windows, y cualquier prueba contra hardware/software real (iDRAC, SQL Server con el
+schema de Extensa, un clúster Elastic, un servidor SSH real) — para eso, ver el checklist de
+[PLAN_MEJORAS_V4.5.md §8](./PLAN_MEJORAS_V4.5.md#8-checklist-de-validación-antes-de-liberar-v45).
 
 ## Versionado
 
-Desde v4.5.0, los tres números de versión están alineados: `AppVersion` en `TecnoMonitor.iss`,
-`agent_version` en el envelope (`agent_logic.ejecutar_ciclo_agente`) y `schema_version` son los
-tres `"4.5.0"`/`"4.5"`. Hasta v4.4.1 no era así (`AppVersion=4.4.1` convivía con
+Desde v4.6, la versión vive en un único archivo, `/VERSION` (contenido: `4.5.0`) — `agent_logic.py`
+lo lee al importar (`AGENT_VERSION`, con `SCHEMA_VERSION` derivado como major.minor) y
+`build.bat` lo pasa a `TecnoMonitor.iss` como macro del preprocesador de Inno Setup
+(`/DMyAppVersion=...`). Bumpear la versión es editar `/VERSION` una sola vez, ya no tocar tres
+archivos a mano. Hasta v4.4.1 ni siquiera estaban alineados (`AppVersion=4.4.1` convivía con
 `agent_version="4.4.0"` y `schema_version="4.3"`) — ver [CHANGELOG.md](./CHANGELOG.md) para el
 detalle de esa inconsistencia histórica.
 
@@ -97,6 +122,3 @@ un build con `schema_version` en `"4.5"`, confirmar que:
 2. Cada hospital que reciba este build tiene un `auth_token` real cargado en su configuración
    (no vacío ni de prueba) — sin esto, el servidor rechaza el reporte completo con 401.
 
-Sigue sin haber un único archivo que centralice el número de versión — al bumpear una versión
-nueva, tocar los tres lugares a mano (`TecnoMonitor.iss`, `agent_logic.py`, y las menciones en
-`build.bat`/`headless_service.py`).

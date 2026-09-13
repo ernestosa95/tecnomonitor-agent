@@ -102,12 +102,19 @@ SCHEMA_VERSION = ".".join(AGENT_VERSION.split(".")[:2]) if AGENT_VERSION else "4
 SCHEMA_VERSION_OVERRIDE_FILE = os.path.join(DATA_DIR, "schema_version_override.txt")
 
 
-def _schema_version_efectiva():
+def _schema_version_efectiva(log_func=None):
     if os.path.exists(SCHEMA_VERSION_OVERRIDE_FILE):
         try:
             with open(SCHEMA_VERSION_OVERRIDE_FILE, "r", encoding="utf-8") as f:
                 valor = f.read().strip()
             if valor:
+                # Se loguea en cada ciclo (no solo al detectarlo la primera
+                # vez) para que un override de emergencia que alguien se
+                # olvidó de borrar quede visible en activity.log de forma
+                # persistente, no como una línea suelta fácil de perder.
+                if log_func:
+                    log_func(f"⚠️ schema_version_override.txt presente: enviando \"{valor}\" en vez de "
+                              f"\"{SCHEMA_VERSION}\" — borrar ese archivo para volver al comportamiento normal.")
                 return valor
         except Exception:
             pass
@@ -235,20 +242,39 @@ def parse_wmi_date(wmi_date):
 
 def _dicom_routing_habilitado(config):
     """
-    Compatibilidad de configuración (v4.3 -> v4.4).
+    Autoenrute DICOM tiene dos caminos independientes, igual que los KPIs de
+    negocio (extraer_metricas_sql / extraer_metricas_ris_elastic): directo a
+    SQL Server (sql.enabled_dicom_routing, restaurado en v4.6 — hasta v4.3 el
+    colector ya leía SQL directo, entre v4.4 y v4.5 solo existía vía
+    ElasticSearch) o vía ElasticSearch (elastic.enabled_dicom_routing). Si
+    ambos están activos, gana Elastic (mismo criterio de prioridad que
+    RIS/PACS/usuarios) — ver docs/PLAN_MEJORAS_V4.5.md.
 
-    Hasta v4.3 el flag de autoenrute vivía en config["sql"]["enabled_dicom_routing"],
-    porque el colector leía SQL Server directo. Desde v4.4 lee ElasticSearch y el
-    flag pasó a config["elastic"]["enabled_dicom_routing"].
-
-    Los agentes ya desplegados tienen el valor viejo guardado; sin este fallback
-    dejarían de reportar en silencio hasta que alguien reguarde la configuración.
-    Se puede eliminar cuando todos los hospitales estén confirmados en v4.4.
+    Devuelve True si cualquiera de los dos está activo y con su host
+    configurado (usado solo para `collection_meta`; qué camino se usa
+    realmente se decide en `ejecutar_ciclo_agente`).
     """
-    elastic = config.get("elastic") or {}
-    if "enabled_dicom_routing" in elastic:
-        return bool(elastic.get("enabled_dicom_routing"))
-    return bool((config.get("sql") or {}).get("enabled_dicom_routing"))
+    elastic_cfg = config.get("elastic") or {}
+    sql_cfg     = config.get("sql") or {}
+    por_elastic = bool(config.get("enabled_elastic") and elastic_cfg.get("enabled_dicom_routing") and elastic_cfg.get("host"))
+    por_sql     = bool(config.get("enabled_sql") and sql_cfg.get("enabled_dicom_routing") and sql_cfg.get("host"))
+    return por_elastic or por_sql
+
+
+def _logs_suitestensa_habilitado(config):
+    """
+    Logs de Suitestensa vía Elastic (v4.6): sub-toggle independiente de la
+    tarjeta Elastic en general (`elastic.enabled_logs`), igual patrón que el
+    autoenrute DICOM y los KPIs de RIS — antes, tener la tarjeta Elastic
+    activa significaba automáticamente que los logs se leían, sin forma de
+    desactivarlos por separado.
+
+    Retrocompatible: configs guardadas antes de este campo no lo tienen, y
+    los logs ya estaban activos siempre que la tarjeta Elastic lo estaba —
+    "ausente o true" = activo, solo un `false` explícito lo desactiva.
+    """
+    elastic_cfg = config.get("elastic") or {}
+    return bool(config.get("enabled_elastic") and elastic_cfg.get("host") and elastic_cfg.get("enabled_logs", True))
 
 # ---------------------------------------------------------------------------
 # CHECKPOINT SQL — escritura atómica, guardado solo al confirmar envío exitoso
@@ -332,22 +358,36 @@ def _ruta_checkpoint_elastic(hospital_id):
 # cifrados — antes estaba duplicada en main_gui.py (_desencriptar_config /
 # guardar_config) y en headless_service.py (cargar_config_segura).
 # ---------------------------------------------------------------------------
+
+# La URL del servidor central es siempre la misma para todos los hospitales
+# de un mismo agente (no es una config por hospital) — ver
+# docs/PLAN_MEJORAS_V4.5.md §9.1. Vive en la raíz de monitor_config.json,
+# junto a interval_minutes, y se sincroniza a cada perfil recién al
+# encriptar/persistir para no tener que tocar ejecutar_ciclo_agente (que
+# sigue leyendo config.get("central_url") del perfil).
+DEFAULT_CENTRAL_URL = "https://tecnomonitor.tecnoimagen.com.ar/v1/hospital-status"
+
+
 def migrar_config_legacy(data: dict) -> dict:
     """Envuelve un monitor_config.json en formato plano (pre-v4.6) como el
     único perfil de `instalaciones[]`. Si ya está migrado, no hace nada.
 
-    `interval_minutes` sube a la raíz: con múltiples perfiles la cadencia es
-    del agente (un único ciclo de servicio), no de un hospital en particular
-    (ver docs/PLAN_MEJORAS_V4.5.md §9.1, decisión de cadencia global)."""
+    `interval_minutes` y `central_url` suben a la raíz: con múltiples
+    perfiles la cadencia es del agente (un único ciclo de servicio) y el
+    servidor central es uno solo, no una config por hospital (ver
+    docs/PLAN_MEJORAS_V4.5.md §9.1, decisiones de cadencia global y URL
+    central única)."""
     if "instalaciones" in data:
         return data
     perfil = dict(data)
     perfil["enabled"] = True
     interval_minutes = perfil.pop("interval_minutes", 5)
+    central_url = perfil.pop("central_url", None)
     return {
         "instalaciones": [perfil],
         "config_version": 2,
         "interval_minutes": interval_minutes,
+        "central_url": central_url or DEFAULT_CENTRAL_URL,
     }
 
 
@@ -435,6 +475,12 @@ def desencriptar_config(data: dict) -> dict:
     Punto de entrada único usado por la GUI y por el servicio al cargar
     monitor_config.json."""
     data = migrar_config_legacy(data)
+    if not data.get("central_url"):
+        # Config ya en formato nuevo pero de antes de que central_url subiera
+        # a la raíz: se toma la de cualquier perfil que la tuviera, si no la
+        # default.
+        de_perfil = next((p.get("central_url") for p in data.get("instalaciones", []) if p.get("central_url")), None)
+        data["central_url"] = de_perfil or DEFAULT_CENTRAL_URL
     data["instalaciones"] = [_desencriptar_perfil(p) for p in data.get("instalaciones", [])]
     return data
 
@@ -442,7 +488,12 @@ def desencriptar_config(data: dict) -> dict:
 def encriptar_config(data: dict) -> dict:
     """Encripta las credenciales de cada perfil antes de persistir a disco.
     Asume que `data` ya viene en formato nuevo (la GUI siempre guarda el
-    array completo, nunca formato plano)."""
+    array completo, nunca formato plano). Sincroniza central_url (único,
+    global) a cada perfil para que ejecutar_ciclo_agente lo siga leyendo tal
+    cual del perfil, sin tener que threadear la config raíz hasta ahí."""
+    data["central_url"] = data.get("central_url") or DEFAULT_CENTRAL_URL
+    for perfil in data.get("instalaciones", []):
+        perfil["central_url"] = data["central_url"]
     data["instalaciones"] = [_encriptar_perfil(p) for p in data.get("instalaciones", [])]
     data["config_version"] = 2
     return data
@@ -834,6 +885,92 @@ def extraer_metricas_ris_elastic(elastic_cfg, hospital_id, log_func=None):
         "application_metrics": application_metrics,
         "_checkpoint_to_save": target_end_time,
     }
+
+
+# ---------------------------------------------------------------------------
+# AUTOENRUTE DICOM — directo a SQL Server (v4.6, restaura el camino directo
+# que existía hasta v4.3 — ver docs/PLAN_MEJORAS_V4.5.md)
+#
+# Misma query confirmada en producción que usa elk/ext_dicom_queues.conf para
+# poblar el índice de Elastic (ver get_dicom_routing_queues más abajo), pero
+# sin depender de un pipeline de Logstash intermedio: el dato es siempre en
+# vivo, no hay "antigüedad de documento" que controlar.
+#
+# Corre en CADA ciclo (interval_minutes global) igual que la variante
+# Elastic — a diferencia de extraer_metricas_sql (KPIs de negocio), NO tiene
+# checkpoint ni ventana de extracción: es una foto del estado actual de las
+# reglas, no una serie histórica.
+# ---------------------------------------------------------------------------
+_DICOM_ROUTING_QUERY = """
+SELECT
+    r.[IDRULE],
+    r.[FROMNODE] AS [FROMNODE_KEY],
+    c_from.[NICKNAME] AS [FROMNODE_NICKNAME],
+    c_from.[HOSTNAME] AS [FROMNODE_HOSTNAME],
+    r.[TONODE] AS [TONODE_KEY],
+    c_to.[NICKNAME] AS [TONODE_NICKNAME],
+    c_to.[HOSTNAME] AS [TONODE_HOSTNAME],
+    ISNULL(p.[PENDING_COUNT], 0) AS [PENDING_INSTANCES]
+FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGRULES] r WITH (NOLOCK)
+LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_from WITH (NOLOCK)
+    ON r.[FROMNODE] = c_from.[CLIENT_KEY]
+LEFT JOIN [ExtensaPACS].[ExtPacs].[DICOMCLIENT] c_to WITH (NOLOCK)
+    ON r.[TONODE] = c_to.[CLIENT_KEY]
+LEFT JOIN (
+    SELECT [IDRULE], COUNT(*) AS [PENDING_COUNT]
+    FROM [ExtensaPACS].[ExtPacs].[DICOMAUTOROUTINGQUEUE] WITH (NOLOCK)
+    GROUP BY [IDRULE]
+) p ON r.[IDRULE] = p.[IDRULE]
+WHERE r.[ACTIVE] = 1
+"""
+
+
+def obtener_dicom_routing_sql(sql_cfg, log_func=None):
+    """
+    Devuelve (routing_queues, status, errores) — mismo contrato y misma
+    forma de `routing_queues` que get_dicom_routing_queues (vía Elastic),
+    así ejecutar_ciclo_agente arma `dicom_routing_queues` igual sin importar
+    qué camino se usó. `snapshot_age_minutes` va siempre en `0.0`: no hay
+    lag de pipeline que medir, el dato es la foto actual de la base.
+    status: "ok" | "empty" | "error"
+    """
+    if not sql_cfg or not sql_cfg.get("host"):
+        return [], "error", 1
+
+    conn_str          = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_cfg['host']};DATABASE=ExtensaPACS;UID={sql_cfg['user']};PWD={sql_cfg['pass']}"
+    conn_str_fallback = f"DRIVER={{SQL Server}};SERVER={sql_cfg['host']};DATABASE=ExtensaPACS;UID={sql_cfg['user']};PWD={sql_cfg['pass']}"
+
+    conn = None
+    try:
+        try:
+            conn = pyodbc.connect(conn_str, timeout=10)
+        except pyodbc.Error:
+            conn = pyodbc.connect(conn_str_fallback, timeout=10)
+
+        cursor = conn.cursor()
+        cursor.execute(_DICOM_ROUTING_QUERY)
+
+        routing_queues = []
+        for idrule, from_key, from_nick, from_host, to_key, to_nick, to_host, pending in cursor.fetchall():
+            routing_queues.append({
+                "id_rule": idrule,
+                "from_node": {"key": from_key, "nickname": from_nick, "hostname": from_host},
+                "to_node":   {"key": to_key,   "nickname": to_nick,   "hostname": to_host},
+                "pending_instances": int(pending or 0),
+                "snapshot_age_minutes": 0.0,
+            })
+
+        if log_func:
+            log_func(f"✅ Autoenrute DICOM (SQL directo): {len(routing_queues)} reglas leídas.")
+        return routing_queues, ("ok" if routing_queues else "empty"), 0
+
+    except Exception as e:
+        if log_func:
+            log_func(f"❌ Error SQL extrayendo colas de enrute: {e}")
+        return [], "error", 1
+    finally:
+        if conn:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2305,15 +2442,15 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "sql":     {"enabled": config.get("enabled_sql",     False), "status": "disabled"},
         "mirth":   {"enabled": config.get("enabled_mirth",   False), "status": "disabled"},
         "ssl_monitoring": {"enabled": config.get("enabled_ssl", False), "status": "disabled"}, # NUEVO
-        # --- NUEVO v4.3 ---
-        "suitestensa_logs": {"enabled": config.get("enabled_elastic", False), "status": "disabled"},
+        # --- NUEVO v4.3, granular desde v4.6 (ver _logs_suitestensa_habilitado) ---
+        "suitestensa_logs": {"enabled": _logs_suitestensa_habilitado(config), "status": "disabled"},
         # --- NUEVO v4.4: permite distinguir "apagado" de "activo sin datos" ---
         "dicom_routing": {"enabled": _dicom_routing_habilitado(config), "status": "disabled"},
     }
 
     reporte = {
         "envelope": {
-            "schema_version": _schema_version_efectiva(),
+            "schema_version": _schema_version_efectiva(log_func=log_callback),
             "agent_version":  AGENT_VERSION,
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
@@ -2397,15 +2534,18 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["sql"]["block_start"] = payload.get("application_metrics", {}).get("start_time_extraction", "")
         collection_meta["sql"]["block_end"]   = payload.get("application_metrics", {}).get("end_time_extraction", "")
 
-    # --- 5.5. Software Monitoring: Autoenrute DICOM (vía ElasticSearch) ---
-    # El gate depende de la tarjeta Elastic, que es de donde sale la conexión.
-    if (config.get("enabled_elastic")
-            and _dicom_routing_habilitado(config)
-            and config.get("elastic", {}).get("host")):
+    # --- 5.5. Software Monitoring: Autoenrute DICOM ---
+    # Dos caminos independientes, igual que los KPIs de negocio (§5): directo
+    # a SQL Server (mismo host que extraer_metricas_sql, corre EN CADA ciclo
+    # -- sin checkpoint ni ventana, es una foto del estado actual de las
+    # reglas) o vía ElasticSearch. Si ambos están activos, gana Elastic
+    # (mismo criterio de prioridad que RIS/PACS/usuarios).
+    elastic_cfg_dicom = config.get("elastic") or {}
+    sql_cfg_dicom     = config.get("sql") or {}
+
+    if config.get("enabled_elastic") and elastic_cfg_dicom.get("enabled_dicom_routing") and elastic_cfg_dicom.get("host"):
         try:
-            dicom_data, d_status, d_errors = get_dicom_routing_queues(
-                config.get("elastic"), log_callback
-            )
+            dicom_data, d_status, d_errors = get_dicom_routing_queues(elastic_cfg_dicom, log_callback)
             reporte["software_monitoring"]["dicom_routing_queues"] = dicom_data
             collection_meta["dicom_routing"]["status"] = d_status
             collection_meta["dicom_routing"]["total"]  = len(dicom_data)
@@ -2415,7 +2555,20 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             collection_meta["dicom_routing"]["status"] = "error"
             collection_meta["dicom_routing"]["error"]  = str(e)
             if log_callback:
-                log_callback(f"❌ Error autoenrute DICOM: {e}")
+                log_callback(f"❌ Error autoenrute DICOM (Elastic): {e}")
+    elif config.get("enabled_sql") and sql_cfg_dicom.get("enabled_dicom_routing") and sql_cfg_dicom.get("host"):
+        try:
+            dicom_data, d_status, d_errors = obtener_dicom_routing_sql(sql_cfg_dicom, log_callback)
+            reporte["software_monitoring"]["dicom_routing_queues"] = dicom_data
+            collection_meta["dicom_routing"]["status"] = d_status
+            collection_meta["dicom_routing"]["total"]  = len(dicom_data)
+            collection_meta["dicom_routing"]["errors"] = d_errors
+        except Exception as e:
+            reporte["software_monitoring"]["dicom_routing_queues"] = []
+            collection_meta["dicom_routing"]["status"] = "error"
+            collection_meta["dicom_routing"]["error"]  = str(e)
+            if log_callback:
+                log_callback(f"❌ Error autoenrute DICOM (SQL): {e}")
     else:
         reporte["software_monitoring"]["dicom_routing_queues"] = []
 
@@ -2437,7 +2590,13 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["ssl_monitoring"]["errors"] = ssl_errors
 
     # --- 6.8. Software Monitoring: Logs de Suitestensa (ElasticSearch) ---
-    if config.get("enabled_elastic") and config.get("elastic", {}).get("host"):
+    if _logs_suitestensa_habilitado(config):
+        # Ver docs/PLAN_MEJORAS_V4.5.md §3.3: HTTPS es opcional (retrocompatible,
+        # default apagado), pero eso no debe ser un riesgo silencioso — se
+        # avisa en cada ciclo mientras el hospital siga en HTTP plano.
+        if not config["elastic"].get("use_https") and log_callback:
+            log_callback("⚠️ ElasticSearch configurado sin HTTPS (texto plano) — "
+                         "considerar activar \"Usar HTTPS\" en la tarjeta de Elastic si el clúster lo soporta.")
         try:
             # 1. Extraemos el intervalo de configuración (o usamos 5 por defecto)
             intervalo_global = int(config.get("interval_minutes", 5))

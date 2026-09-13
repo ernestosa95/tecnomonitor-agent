@@ -26,8 +26,9 @@
         .card-header .form-check { margin: 0; }
         .fade-field { transition: all 0.3s ease-in-out; }
 
-        /* --- HOME: grid de tarjetas de hospital --- */
-        #homeGrid, #modulosGrid {
+        /* --- Grid de tarjetas chicas (Home, mediciones, y listas dinámicas
+             dentro de un módulo: equipos, servidores Mirth) --- */
+        #homeGrid, #modulosGrid, .modulos-grid-interno {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
             gap: 16px;
@@ -41,6 +42,7 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
+            position: relative;
         }
         .hospital-card { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.15s ease; }
         .hospital-card:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.1); transform: translateY(-2px); }
@@ -57,8 +59,16 @@
             transition: border-color 0.15s ease, color 0.15s ease;
         }
         .add-card:hover { border-color: #0d6efd; color: #0d6efd; }
-        .hospital-card .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
-        .hospital-card .hospital-id { font-weight: bold; color: #2c3e50; font-size: 1.05em; word-break: break-all; }
+        .hospital-card .card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        .hospital-card .hospital-id {
+            display: flex; align-items: center; gap: 6px; min-width: 0;
+            font-weight: bold; color: #2c3e50; font-size: 1.05em;
+        }
+        .hospital-card .hospital-id i { flex-shrink: 0; }
+        .hospital-card .hospital-id span {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .hospital-card .card-top .badge { flex-shrink: 0; }
         .modulo-card .modulo-titulo { font-weight: 600; color: #2c3e50; font-size: 0.95em; }
         #hospitalDetailView { display: none; }
         .picker-item { cursor: pointer; }
@@ -142,6 +152,10 @@
     async function inicializarAcceso() {
         try {
             const estado = await pywebview.api.estado_acceso_gui();
+            if (estado && estado.agent_version) {
+                const badge = document.getElementById("versionBadge");
+                if (badge) badge.textContent = "v" + estado.agent_version;
+            }
             if (estado && estado.primera_vez && estado.codigo) {
                 document.getElementById("codigoGenerado").textContent = estado.codigo;
                 document.getElementById("primeraVezView").style.display = "flex";
@@ -209,7 +223,10 @@
                 <i class="fas fa-arrow-left me-1"></i>Hospitales
             </button>
             <div>
-                <h3 class="mb-0 fw-bold" id="tituloHeader">TecnoMonitor Agent</h3>
+                <h3 class="mb-0 fw-bold">
+                    <span id="tituloHeader">TecnoMonitor Agent</span>
+                    <small class="text-white-50" id="versionBadge" style="font-weight:normal;"></small>
+                </h3>
                 <small class="text-white-50" id="subtituloHeader">Configuración Local</small>
             </div>
         </div>
@@ -224,24 +241,46 @@
     <div class="container mt-4 pb-5" id="homeView">
 
         <div class="card mb-4 shadow-sm">
-            <div class="card-body d-flex flex-wrap align-items-end gap-3">
-                <div>
-                    <label class="form-label mb-0 fw-bold">Intervalo global de monitoreo (minutos)</label>
-                    <small class="text-muted d-block mb-1">
-                        Cadencia única del agente: se aplica a todos los hospitales de esta lista.
-                    </small>
-                    <input type="number" class="form-control" id="intervalo" value="5" min="1" style="width:140px;">
+            <div class="card-body">
+                <div class="d-flex flex-nowrap align-items-center gap-3">
+                    <div class="d-flex align-items-center gap-2">
+                        <label class="form-label mb-0 fw-bold text-nowrap"
+                               title="Cadencia única del agente: se aplica a todos los hospitales de esta lista.">
+                            Intervalo global (min)
+                        </label>
+                        <input type="number" class="form-control" id="intervalo" value="5" min="1" style="width:80px;">
+                        <button class="btn btn-primary text-nowrap" onclick="guardarIntervaloGlobal()">
+                            <i class="fas fa-save me-2"></i>Guardar
+                        </button>
+                    </div>
+                    <div class="ms-auto d-flex align-items-center gap-2">
+                        <button class="btn btn-outline-secondary text-nowrap" data-bs-toggle="collapse"
+                                href="#collapseAvanzadoGlobal" title="Solo si necesitás apuntar a otro servidor central">
+                            <i class="fas fa-cog me-2"></i>Avanzado
+                        </button>
+                        <button class="btn btn-outline-secondary text-nowrap" onclick="cambiarCodigoAcceso()"
+                                title="Generar un código de acceso nuevo para esta GUI">
+                            <i class="fas fa-key me-2"></i>Cambiar código
+                        </button>
+                        <button class="btn btn-danger btn-lg text-nowrap" id="btn_monitor_toggle" onclick="toggleMonitoreo()">
+                            <i class="fas fa-stop me-2"></i>Detener Monitoreo
+                        </button>
+                    </div>
                 </div>
-                <button class="btn btn-primary" onclick="guardarIntervaloGlobal()">
-                    <i class="fas fa-save me-2"></i>Guardar intervalo
-                </button>
-                <button class="btn btn-outline-secondary" onclick="cambiarCodigoAcceso()" title="Generar un código de acceso nuevo para esta GUI">
-                    <i class="fas fa-key me-2"></i>Cambiar código de acceso
-                </button>
-                <div class="ms-auto d-flex gap-2">
-                    <button class="btn btn-danger btn-lg" id="btn_monitor_toggle" onclick="toggleMonitoreo()">
-                        <i class="fas fa-stop me-2"></i>Detener Monitoreo
-                    </button>
+                <div class="collapse mt-3" id="collapseAvanzadoGlobal">
+                    <hr>
+                    <label class="form-label mb-1">URL del servidor central</label>
+                    <p class="text-muted small mb-2">
+                        Es la misma para todos los hospitales de este agente. Solo se cambia si
+                        el servidor central se muda de dirección — el valor por defecto ya es el correcto.
+                    </p>
+                    <div class="input-group" style="max-width: 640px;">
+                        <input type="text" class="form-control" id="central_url"
+                               placeholder="https://api.tecnoimagen.../v1/hospital-status">
+                        <button class="btn btn-warning text-white" onclick="testCentral()">
+                            Test Conexión
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -286,16 +325,6 @@
                                oncopy="return false" oncut="return false"
                                autocomplete="new-password">
                     </div>
-                    <div class="col-md-12">
-                        <label class="form-label">URL Servidor Central</label>
-                        <div class="input-group">
-                            <input type="text" class="form-control" id="central_url"
-                                   placeholder="https://api.tecnoimagen.../v1/hospital-status">
-                            <button class="btn btn-warning text-white" onclick="testCentral()">
-                                Test Conexión
-                            </button>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -305,9 +334,15 @@
 
         <div class="card border-danger shadow-sm">
             <div class="card-body d-flex justify-content-between align-items-center">
-                <button class="btn btn-primary btn-lg" onclick="guardarPerfilActivo()">
-                    <i class="fas fa-save me-2"></i>Guardar cambios del hospital
-                </button>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-primary btn-lg" onclick="guardarPerfilActivo()">
+                        <i class="fas fa-save me-2"></i>Guardar cambios del hospital
+                    </button>
+                    <button class="btn btn-outline-primary" onclick="enviarAhora()"
+                            title="Prueba un envío inmediato con lo que hay en el formulario, sin esperar el intervalo global ni guardar antes">
+                        <i class="fas fa-paper-plane me-2"></i>Enviar ahora
+                    </button>
+                </div>
                 <button class="btn btn-outline-danger" onclick="eliminarHospitalActivo()">
                     <i class="fas fa-trash me-2"></i>Eliminar este hospital
                 </button>
@@ -445,10 +480,11 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body" id="vms_body">
-                    <div id="vms_list"></div>
-                    <button class="btn btn-secondary w-100 mt-3" onclick="agregarVM()">
-                        <i class="fas fa-plus me-2"></i>Agregar Equipo (VM o WS) a Monitorear
-                    </button>
+                    <div id="vms_list" class="modulos-grid-interno">
+                        <div class="add-card" onclick="agregarVM()">
+                            <i class="fas fa-plus fa-2x mb-2"></i><div>Agregar equipo</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer justify-content-start">
                     <button class="btn btn-outline-danger" onclick="quitarModulo('vms')">
@@ -468,11 +504,9 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body" id="sql_body">
-                    <small class="text-muted d-block mb-3">
-                        <i class="fas fa-circle-info me-1"></i>
-                        Si "KPIs de RIS vía Elastic" está activo en la medición de ElasticSearch,
-                        esa configuración tiene prioridad y esta tarjeta se ignora.
-                    </small>
+                    <!-- Conexión compartida por las dos mediciones de abajo (KPIs de negocio y
+                         autoenrute DICOM directo) -- mismo criterio que la tarjeta Elastic, cuya
+                         conexión de arriba también es compartida entre sus sub-ítems. -->
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="form-label text-muted small fw-bold">IP / Hostname (SQL)</label>
@@ -492,17 +526,66 @@
                             <input type="password" class="form-control" id="sql_pass"
                                    oncopy="return false" oncut="return false" autocomplete="new-password">
                         </div>
+                    </div>
 
-                        <div class="col-md-3 mt-3">
+                    <!-- Mismo patrón tarjeta chica + modal que la tarjeta Elastic: cada
+                         sub-ítem del módulo SQL es una tarjeta, no campos siempre desplegados. -->
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-6">
+                            <div class="modulo-card" onclick="abrirModalModulo('sql_kpis')">
+                                <i class="fas fa-chart-bar text-primary mb-1"></i>
+                                <span class="modulo-titulo">KPIs de Negocio</span>
+                            </div>
+                        </div>
+                        <!-- Sub-ítem: Autoenrute DICOM directo a SQL (v4.6, restaura el camino
+                             que existía hasta v4.3 -- ver docs/PLAN_MEJORAS_V4.5.md). Si la
+                             versión vía Elastic también está activa, esa tiene prioridad. -->
+                        <div class="col-md-6">
+                            <div class="modulo-card" onclick="abrirModalModulo('sql_dicom_routing')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="sql_enabled_dicom_routing">
+                                </div>
+                                <i class="fas fa-route text-primary mb-1"></i>
+                                <span class="modulo-titulo">Autoenrute DICOM (directo a SQL)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-start">
+                    <button class="btn btn-outline-danger" onclick="quitarModulo('sql')">
+                        <i class="fas fa-trash me-1"></i>Quitar medición
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: KPIs de Negocio (sub-ítem de la tarjeta SQL) -->
+    <div class="modal fade" id="modal_sql_kpis" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-chart-bar me-2"></i>KPIs de Negocio (SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <small class="text-muted d-block mb-3">
+                        <i class="fas fa-circle-info me-1"></i>
+                        Si "KPIs de RIS vía Elastic" está activo en la medición de ElasticSearch,
+                        esa configuración tiene prioridad y esta medición se ignora. Usa la misma
+                        conexión SQL configurada arriba.
+                    </small>
+                    <div class="row g-3">
+                        <div class="col-md-3">
                             <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
                             <input type="number" class="form-control" id="sql_exec_day" value="3" min="1" max="24">
                         </div>
-                        <div class="col-md-4 mt-3">
+                        <div class="col-md-4">
                             <label class="form-label text-muted small fw-bold">Fecha Inicio (Backfill)</label>
                             <input type="date" class="form-control" id="sql_start_date">
                             <small class="text-muted d-block mt-1">Dejar vacío para iniciar hoy.</small>
                         </div>
-                        <div class="col-md-5 mt-3 d-flex align-items-end justify-content-end gap-2">
+                        <div class="col-md-5 d-flex align-items-end justify-content-end gap-2">
                             <button class="btn btn-danger shadow-sm text-white" onclick="resetHistorial()"
                                     title="Borrar memoria y forzar extracción desde la fecha elegida">
                                 <i class="fas fa-history"></i> Resetear Historial
@@ -513,10 +596,26 @@
                         </div>
                     </div>
                 </div>
-                <div class="modal-footer justify-content-start">
-                    <button class="btn btn-outline-danger" onclick="quitarModulo('sql')">
-                        <i class="fas fa-trash me-1"></i>Quitar medición
-                    </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Autoenrute DICOM directo a SQL (sub-ítem de la tarjeta SQL) -->
+    <div class="modal fade" id="modal_sql_dicom_routing" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-route me-2"></i>Autoenrute DICOM (directo a SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-0">
+                        Corre en cada ciclo del intervalo global, no en el bloque de la tarjeta
+                        "KPIs de Negocio" — es una foto en vivo del estado de las reglas, no una
+                        serie histórica. Si "Autoenrute DICOM" también está activo en la tarjeta de
+                        Elastic, esa versión tiene prioridad. No tiene campos propios: usa la misma
+                        conexión SQL configurada arriba.
+                    </p>
                 </div>
             </div>
         </div>
@@ -531,10 +630,11 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body" id="mirth_body">
-                    <div id="mirth_list"></div>
-                    <button class="btn btn-secondary w-100 mt-3" onclick="agregarMirth()">
-                        <i class="fas fa-plus me-2"></i>Agregar Servidor Mirth
-                    </button>
+                    <div id="mirth_list" class="modulos-grid-interno">
+                        <div class="add-card" onclick="agregarMirth()">
+                            <i class="fas fa-plus fa-2x mb-2"></i><div>Agregar servidor Mirth</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer justify-content-start">
                     <button class="btn btn-outline-danger" onclick="quitarModulo('mirth')">
@@ -583,6 +683,9 @@
                     <p class="text-muted small mb-3">
                         Configura la conexión al motor de ElasticSearch para analizar proactivamente los logs de errores de Suitestensa y leer el estado de las colas de autoenrute DICOM.
                     </p>
+                    <!-- Conexión compartida por las tres mediciones de abajo (logs, autoenrute
+                         DICOM, KPIs de RIS) -- el patrón de índice de logs NO va acá: es
+                         específico de la medición "Logs de Suitestensa", se movió a su modal. -->
                     <div class="row g-3">
                         <div class="col-md-5">
                             <label class="form-label text-muted small fw-bold">IP / Hostname de Elastic</label>
@@ -593,24 +696,19 @@
                             <input type="number" class="form-control" id="elastic_port" placeholder="29200" value="9200">
                             <small class="text-muted d-block mt-1">Instalaciones Estensa suelen usar 29200.</small>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label text-muted small fw-bold">Patrón de Índice (Logs)</label>
-                            <input type="text" class="form-control" id="elastic_index_pattern"
-                                   placeholder="se-es-logging-*" value="se-es-logging-*">
-                        </div>
-                        <div class="col-md-12">
-                            <div class="form-check form-switch">
+                        <div class="col-md-4 d-flex align-items-end">
+                            <div class="form-check form-switch mb-2">
                                 <input class="form-check-input" type="checkbox" id="elastic_use_https">
                                 <label class="form-check-label small" for="elastic_use_https">
-                                    Usar HTTPS (el clúster de Elastic soporta TLS)
+                                    Usar HTTPS (el clúster soporta TLS)
                                 </label>
                             </div>
                         </div>
-                        <div class="col-md-6 mt-3">
+                        <div class="col-md-6">
                             <label class="form-label text-muted small fw-bold">Usuario</label>
                             <input type="text" class="form-control" id="elastic_user" placeholder="Ej: elastic">
                         </div>
-                        <div class="col-md-6 mt-3">
+                        <div class="col-md-6">
                             <label class="form-label text-muted small fw-bold">Contraseña</label>
                             <div class="input-group">
                                 <input type="password" class="form-control" id="elastic_pass"
@@ -620,102 +718,40 @@
                                 </button>
                             </div>
                         </div>
+                    </div>
 
-                        <!-- Sub-ítem: Autoenrute DICOM -->
-                        <div class="col-md-12 mt-3">
-                            <div class="p-3 border rounded bg-light">
-                                <div class="form-check form-switch d-flex align-items-center m-0">
-                                    <input class="form-check-input fs-4 mt-0 me-3" type="checkbox" id="enabled_dicom_routing"
-                                           onchange="toggleDicomRouting(this)">
-                                    <div>
-                                        <label class="form-check-label fw-bold text-primary mb-0" for="enabled_dicom_routing">
-                                            Monitorear Colas de Autoenrute DICOM
-                                        </label>
-                                        <small class="text-muted d-block mt-1">
-                                            Lee el estado de las reglas de enrute desde el índice indexado por Logstash.
-                                            Requiere permiso de lectura sobre ese índice para el usuario configurado arriba.
-                                        </small>
-                                    </div>
+                    <!-- Sub-ítems: tarjeta chica + modal de detalle (mismo patrón que las
+                         mediciones del hospital) en vez de un bloque siempre desplegado —
+                         el switch de cada tarjeta decide si el sub-módulo está activo,
+                         tocar el resto de la tarjeta abre su configuración. -->
+                    <div class="row g-3 mt-1">
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('elastic_logs')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="elastic_enabled_logs" checked>
                                 </div>
-
-                                <div class="row g-3 mt-1" id="dicom_routing_fields" style="opacity: 0.5; pointer-events: none;">
-                                    <div class="col-md-6">
-                                        <label class="form-label text-muted small fw-bold">Índice de Autoenrute</label>
-                                        <input type="text" class="form-control" id="elastic_dicom_index"
-                                               placeholder="ext_dicom_queues" value="ext_dicom_queues">
-                                        <small class="text-muted d-block mt-1">
-                                            Índice de estado actual (upsert por IDRULE), no el histórico.
-                                        </small>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <label class="form-label text-muted small fw-bold">Antigüedad máxima (min)</label>
-                                        <input type="number" class="form-control" id="elastic_dicom_max_age" value="15" min="1">
-                                        <small class="text-muted d-block mt-1">
-                                            Descarta lecturas más viejas: detecta un pipeline caído.
-                                        </small>
-                                    </div>
-                                    <div class="col-md-2 d-flex align-items-start">
-                                        <button class="btn btn-warning text-white w-100 mt-4" onclick="testDicomIndex()">
-                                            <i class="fas fa-plug"></i> Test
-                                        </button>
-                                    </div>
-                                </div>
+                                <i class="fas fa-file-lines text-primary mb-1"></i>
+                                <span class="modulo-titulo">Logs de Suitestensa</span>
                             </div>
                         </div>
-                        <!-- FIN Sub-ítem -->
-
-                        <!-- Sub-ítem: KPIs de RIS vía Elastic -->
-                        <div class="col-md-12 mt-3">
-                            <div class="p-3 border rounded bg-light">
-                                <div class="form-check form-switch d-flex align-items-center m-0">
-                                    <input class="form-check-input fs-4 mt-0 me-3" type="checkbox" id="enabled_ris_metrics"
-                                           onchange="toggleRisMetrics(this)">
-                                    <div>
-                                        <label class="form-check-label fw-bold text-primary mb-0" for="enabled_ris_metrics">
-                                            KPIs de RIS vía Elastic
-                                        </label>
-                                        <small class="text-muted d-block mt-1">
-                                            Reemplaza a la medición "Métricas de Negocio (SQL)": suma buckets horarios que
-                                            un pipeline de Logstash publica a Elastic, en vez de conectar directo a SQL Server.
-                                            Requiere que ese pipeline ya esté corriendo en el hospital (ver docs/ELK_RIS_METRICS.md).
-                                        </small>
-                                    </div>
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('dicom_routing')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="enabled_dicom_routing">
                                 </div>
-
-                                <div class="row g-3 mt-1" id="ris_metrics_fields" style="opacity: 0.5; pointer-events: none;">
-                                    <div class="col-md-3">
-                                        <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
-                                        <input type="number" class="form-control" id="elastic_ris_exec_day" value="3" min="1" max="24">
-                                    </div>
-                                    <div class="col-md-3">
-                                        <label class="form-label text-muted small fw-bold">Fecha Inicio (Backfill)</label>
-                                        <input type="date" class="form-control" id="elastic_ris_start_date">
-                                        <small class="text-muted d-block mt-1">Dejar vacío para iniciar hoy.</small>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label text-muted small fw-bold">Índice RIS</label>
-                                        <input type="text" class="form-control" id="elastic_ris_index_ris"
-                                               placeholder="ext_ris_metrics_hourly" value="ext_ris_metrics_hourly">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label text-muted small fw-bold">Índice PACS</label>
-                                        <input type="text" class="form-control" id="elastic_ris_index_pacs"
-                                               placeholder="ext_pacs_metrics_hourly" value="ext_pacs_metrics_hourly">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label text-muted small fw-bold">Índice Usuarios</label>
-                                        <input type="text" class="form-control" id="elastic_ris_index_users"
-                                               placeholder="ext_users_metrics_hourly" value="ext_users_metrics_hourly">
-                                    </div>
-                                    <div class="col-md-12 d-flex justify-content-end">
-                                        <button class="btn btn-warning text-white" onclick="testRisMetrics()">
-                                            <i class="fas fa-plug"></i> Test (los 3 índices)
-                                        </button>
-                                    </div>
-                                </div>
+                                <i class="fas fa-route text-primary mb-1"></i>
+                                <span class="modulo-titulo">Autoenrute DICOM</span>
                             </div>
                         </div>
-                        <!-- FIN Sub-ítem -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('ris_metrics')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="enabled_ris_metrics">
+                                </div>
+                                <i class="fas fa-chart-line text-primary mb-1"></i>
+                                <span class="modulo-titulo">KPIs de RIS vía Elastic</span>
+                            </div>
+                        </div>
 
                     </div>
                 </div>
@@ -723,6 +759,119 @@
                     <button class="btn btn-outline-danger" onclick="quitarModulo('elastic')">
                         <i class="fas fa-trash me-1"></i>Quitar medición
                     </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Logs de Suitestensa (sub-ítem de la tarjeta Elastic) -->
+    <div class="modal fade" id="modal_elastic_logs" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-file-lines me-2"></i>Logs de Suitestensa</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Analiza proactivamente los logs de errores de Suitestensa (ver
+                        <code>rules.json</code> y docs/REGLAS_LOGS.md) usando la conexión
+                        configurada arriba, en esta misma medición.
+                    </p>
+                    <label class="form-label text-muted small fw-bold">Patrón de Índice (Logs)</label>
+                    <input type="text" class="form-control" id="elastic_index_pattern"
+                           placeholder="se-es-logging-*" value="se-es-logging-*">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Autoenrute DICOM vía Elastic (sub-ítem de la tarjeta Elastic) -->
+    <div class="modal fade" id="modal_dicom_routing" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-route me-2"></i>Autoenrute DICOM (vía Elastic)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Lee el estado de las reglas de enrute desde el índice indexado por Logstash.
+                        Requiere permiso de lectura sobre ese índice para el usuario configurado en la
+                        tarjeta de Elastic.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label text-muted small fw-bold">Índice de Autoenrute</label>
+                            <input type="text" class="form-control" id="elastic_dicom_index"
+                                   placeholder="ext_dicom_queues" value="ext_dicom_queues">
+                            <small class="text-muted d-block mt-1">
+                                Índice de estado actual (upsert por IDRULE), no el histórico.
+                            </small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small fw-bold">Antigüedad máxima (min)</label>
+                            <input type="number" class="form-control" id="elastic_dicom_max_age" value="15" min="1">
+                            <small class="text-muted d-block mt-1">
+                                Descarta lecturas más viejas: detecta un pipeline caído.
+                            </small>
+                        </div>
+                        <div class="col-md-2 d-flex align-items-start">
+                            <button class="btn btn-warning text-white w-100 mt-4" onclick="testDicomIndex()">
+                                <i class="fas fa-plug"></i> Test
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: KPIs de RIS vía Elastic (sub-ítem de la tarjeta Elastic) -->
+    <div class="modal fade" id="modal_ris_metrics" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-chart-line me-2"></i>KPIs de RIS vía Elastic</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Reemplaza a la medición "Métricas de Negocio (SQL)": suma buckets horarios que
+                        un pipeline de Logstash publica a Elastic, en vez de conectar directo a SQL Server.
+                        Requiere que ese pipeline ya esté corriendo en el hospital (ver docs/ELK_RIS_METRICS.md).
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
+                            <input type="number" class="form-control" id="elastic_ris_exec_day" value="3" min="1" max="24">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Fecha Inicio (Backfill)</label>
+                            <input type="date" class="form-control" id="elastic_ris_start_date">
+                            <small class="text-muted d-block mt-1">Dejar vacío para iniciar hoy.</small>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label text-muted small fw-bold">Índice RIS</label>
+                            <input type="text" class="form-control" id="elastic_ris_index_ris"
+                                   placeholder="ext_ris_metrics_hourly" value="ext_ris_metrics_hourly">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label text-muted small fw-bold">Índice PACS</label>
+                            <input type="text" class="form-control" id="elastic_ris_index_pacs"
+                                   placeholder="ext_pacs_metrics_hourly" value="ext_pacs_metrics_hourly">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label text-muted small fw-bold">Índice Usuarios</label>
+                            <input type="text" class="form-control" id="elastic_ris_index_users"
+                                   placeholder="ext_users_metrics_hourly" value="ext_users_metrics_hourly">
+                        </div>
+                        <div class="col-md-12 d-flex justify-content-end">
+                            <button class="btn btn-warning text-white" onclick="testRisMetrics()">
+                                <i class="fas fa-plug"></i> Test (los 3 índices)
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

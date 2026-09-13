@@ -186,8 +186,12 @@ Diferencias reales del camino Linux/SSH contra el de Windows/WMI (ver §9.2 para
 ```
 
 `dicom_routing_queues` es siempre un array (vacío si el módulo está apagado, con error, o
-`stale`/`empty` — ver [MODULOS.md](./MODULOS.md)). Las demás claves solo aparecen si su
-módulo respectivo está habilitado y tiene servidores/URLs configurados.
+`stale`/`empty` — ver [MODULOS.md](./MODULOS.md)). Desde v4.6 se puede leer directo de SQL
+Server o vía Elastic (gana Elastic si ambos están configurados) — la única diferencia visible
+en esta clave es `snapshot_age_minutes`: siempre `0.0` en el camino SQL directo (no hay lag de
+pipeline que medir), refleja la antigüedad real del documento indexado en el camino Elastic.
+Las demás claves solo aparecen si su módulo respectivo está habilitado y tiene
+servidores/URLs configurados.
 
 ## `application_metrics`
 
