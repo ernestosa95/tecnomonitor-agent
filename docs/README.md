@@ -20,6 +20,7 @@ no incluye cambios ni propuestas de código, solo documentación de referencia.
 | [SEGURIDAD.md](./SEGURIDAD.md) | Modelo de seguridad actual: qué protege, qué no, y limitaciones conocidas |
 | [CHANGELOG.md](./CHANGELOG.md) | Historial de versiones reconstruido a partir de comentarios en el código |
 | [PLAN_MEJORAS_V4.5.md](./PLAN_MEJORAS_V4.5.md) | Plan de mejoras para v4.5: bugs de paridad con el contrato del servidor, seguridad, robustez, performance y secuencia de release |
+| [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md) | Plan (en ejecución) del chequeo de integridad de bases SQL Server (`DBCC CHECKDB`) tras un reinicio: dos caminos (Elastic principal, SQL directo excepción), contrato `sql_integrity`, fases y riesgos |
 | [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md) | Migración de KPIs de RIS de SQL directo a ElasticSearch (Logstash), mismo patrón que el autoenrute DICOM |
 | `tests/` (ver [BUILD.md#tests](./BUILD.md#tests)) | Suite de `pytest`: migración de config, gate de sesión, recolección SSH, ciclo multi-hospital, robustez/seguridad |
 

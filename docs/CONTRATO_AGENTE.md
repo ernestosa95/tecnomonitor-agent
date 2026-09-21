@@ -257,6 +257,44 @@ afectar el resto del reporte.
 **Nada de esto tiene un toggle nuevo en la GUI del agente** — se activa automáticamente junto
 con `enabled_mirth` + `mirth_servers[]`, que ya existían.
 
+### 7ter. `sql_integrity` — chequeo de integridad de bases tras un reinicio (planificado, agente 4.5.2)
+
+> ⚠️ **Planificado, todavía no implementado en el agente.** Plan completo en
+> [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md). El servidor ya puede ingerirlo
+> (ver el contrato de ingesta, §7.5).
+
+Clave opcional de `software_monitoring`. Se manda **una sola vez por reinicio** del servicio SQL
+Server (no en cada ciclo), cuando termina el `DBCC CHECKDB` de las bases configuradas, y solo si el
+módulo está habilitado (camino Elastic o SQL directo; si ambos están activos gana Elastic).
+
+```json
+"sql_integrity": {
+  "sqlserver_start_time": "2026-09-21T08:14:03",
+  "check_type": "full",
+  "source": "elastic",
+  "databases": [
+    { "db": "ExtensaRadio", "status": "OK",    "error_count": 0, "detail": "",
+      "duration_s": 412, "checked_at": "2026-09-21T09:41:10" },
+    { "db": "ExtensaPACS",  "status": "ERROR", "error_count": 3, "detail": "Msg 8939 ... (truncado)",
+      "duration_s": 95,  "checked_at": "2026-09-21T09:43:02" }
+  ]
+}
+```
+
+| Campo | Descripción |
+|---|---|
+| `sqlserver_start_time` | Arranque del servicio SQL que originó el chequeo. Hora local del hospital, sin zona (igual que `envelope.timestamp`). |
+| `check_type` | `"full"` o `"physical_only"`. |
+| `source` | `"elastic"` o `"sql"`: por qué camino se obtuvo. |
+| `databases[].status` | `OK` · `ERROR` (el CHECKDB encontró errores o no pudo ejecutarse) · `NOT_ONLINE` (la base no estaba `ONLINE`; `detail` trae el estado). |
+| `databases[].error_count` | Cantidad de errores que devolvió CHECKDB (0 si `OK`). |
+| `databases[].detail` | Primeros mensajes de error, truncados (máx. ~500 caracteres). Vacío si `OK`. |
+| `databases[].duration_s` | Segundos que tardó esa base. |
+| `databases[].checked_at` | Cuándo terminó esa base (hora local del hospital, sin zona). |
+
+Mientras el chequeo corre o espera, `collection_meta.sql_integrity.status` es `"running"` o
+`"pending"`; la clave `sql_integrity` recién viaja al terminar.
+
 ## 8. `collection_meta` — clave que el agente manda y no está en el contrato de ingesta
 
 ```json
