@@ -4,7 +4,8 @@ Contraparte de `10-contratoingestaagente.md` (contrato de ingesta del servidor, 
 el usuario, `2026-09-10`/`2026-09-11`): mientras aquel documenta qué exige y consume
 `alerts_engine`, este documenta qué **efectivamente arma y manda** `TecnoMonitor Agent` hoy.
 Basado en lectura exacta de `agent_logic.py` (función `ejecutar_ciclo_agente` y las funciones
-de recolección que llama) — no es una interpretación, es lo que el código hace, `2026-09-12`.
+de recolección que llama) — no es una interpretación, es lo que el código hace, `2026-09-12`
+(§2bis revisado `2026-09-17`: el manejo de 401 marcado ahí como pendiente ya estaba resuelto).
 
 Pensado para pasarle al equipo de servidor como referencia de sincronización: si algo de acá
 no coincide con lo que ese equipo entiende que el agente manda, es una señal de que uno de los
@@ -61,11 +62,15 @@ algo que varíe reporte a reporte ni hospital a hospital.
   (`instalaciones[].auth_token`), no uno solo por instalación — cada perfil configurado en el
   mismo equipo agente manda su propio token, para su propio `hospital_id`, en su propio POST
   independiente (ver §9).
-- **Pendiente del lado agente** (anotado en
-  [PLAN_MEJORAS_V4.5.md §2](./PLAN_MEJORAS_V4.5.md#2--hecho-preparación-para-autenticación-obligatoria-schema_version-45)):
-  un `401` hoy cae al mismo manejo genérico de error que cualquier otro fallo de red (ver §8) —
-  no se distingue en el log "token rechazado" de "servidor caído". No afecta lo que se manda,
-  sí la capacidad de diagnosticar un rechazo de auth desde el lado del agente.
+- **Resuelto** (anotado en
+  [PLAN_MEJORAS_V4.5.md §2, ítem 4](./PLAN_MEJORAS_V4.5.md#2--hecho-preparación-para-autenticación-obligatoria-schema_version-45)):
+  `ejecutar_ciclo_agente` tiene un `except requests.exceptions.HTTPError` específico antes del
+  genérico que, si `status_code == 401`, loguea un mensaje distinto ("🔒 401 No autorizado: el
+  token fue rechazado o no corresponde al hospital_id configurado...") y lo devuelve como
+  `http_status: 401` en el resultado del ciclo — ya no cae en el mismo bloque que una caída de
+  red genérica (ver §8 para el resto de los códigos de error). *(Este documento decía
+  "pendiente" hasta `2026-09-17`; el fix ya estaba en el código desde antes de esa fecha, el
+  documento había quedado desactualizado.)*
 
 ## 3. `envelope`
 
@@ -186,7 +191,8 @@ Cuatro sub-claves, cada una presente solo si su módulo está habilitado y tiene
 ```json
 {
   "dicom_routing_queues": [ { "id_rule": "R001", "from_node": {"key":"...","nickname":"...","hostname":"..."}, "to_node": {"key":"...","nickname":"...","hostname":"..."}, "pending_instances": 42 } ],
-  "mirth": { "Produccion_Principal": [ { "channel": "ADT_IN", "status": "RUNNING", "queued": 0, "received": 15234, "sent": 15234, "last_error": "" } ] },
+  "mirth": { "Produccion_Principal": [ { "channel": "ADT_IN", "channel_id": "7f3c1a2e-...", "status": "RUNNING", "queued": 0, "received": 15234, "sent": 15234, "errored": 0, "last_error": "" } ] },
+  "mirth_topology": { "Produccion_Principal": { "collected_at": "2026-09-17T10:05:03", "full": true, "channels": [ { "channel_id": "7f3c1a2e-...", "name": "ADT_IN", "revision": 12, "source": {"transport":"TCP Listener","endpoint":"0.0.0.0:6661","host":"0.0.0.0","port":6661,"target_channel_id":null}, "destinations": [ {"metadata_id":1,"name":"Enviar a RIS","transport":"TCP Sender","endpoint":"10.0.2.10:6663","host":"10.0.2.10","port":6663,"target_channel_id":null,"enabled":true} ] } ] } },
   "ssl_certificates": [ { "url": "https://pacs.hospital.com", "status": "OK", "expiration_date": "2027-03-01T00:00:00Z", "days_remaining": 180, "issuer": "DigiCert" } ],
   "suitestensa_logs": { "scan_time": "2026-09-12T10:05:00Z", "events": [ { "rule_id": "DCM-COM-01", "count": 3 } ] }
 }
@@ -202,6 +208,54 @@ Desde v4.6 el agente puede armar esta lista leyendo directo de SQL Server o vía
 `snapshot_age_minutes`, que no está en el ejemplo de arriba: viaja en `0.0` si el agente leyó
 directo de SQL (no hay lag de pipeline que medir), o con la antigüedad real del documento si
 leyó de Elastic.
+
+### 7bis. `mirth` y `mirth_topology` — extendidos para el mapa de integraciones (`mirth_collector.py`)
+
+Dos campos nuevos por canal dentro de `mirth[instancia][]`, agregados sin sacar ninguno de los
+que ya existían (retrocompatible con cualquier consumidor viejo que ignore claves que no
+conoce):
+
+- `channel_id`: el GUID interno que usa Mirth para identificar el canal, estable aunque se le
+  cambie el nombre — se lee del mismo `dashboardStatus` de `/api/channels/statuses` que ya se
+  consultaba (antes se leía y se tiraba). Reemplaza a `component_id` (`"[alias] nombre"`) como
+  identificador preferido para lo que necesite sobrevivir a un rename.
+- `errored`: el mismo contador de errores que antes solo viajaba mezclado en el string
+  `last_error` ("Errores acumulados: N"), ahora también como número propio. `last_error` se
+  mantiene igual, por compatibilidad.
+
+`mirth_topology` es una clave hermana nueva, presente solo si `GET /api/channels` respondió
+bien en ese ciclo para esa instancia (si falló y no hay nada cacheado de un ciclo anterior, la
+instancia completa se omite de `mirth_topology` sin afectar `mirth[instancia]`, que sigue
+mandándose igual). Por instancia: `collected_at` (hora de la última lectura real, no
+necesariamente de este ciclo — ver cache abajo), `full: true` (la lista de `channels[]` es el
+inventario completo de esa instancia en ese momento, permite al consumidor "envejecer" los
+canales que dejaron de aparecer), y `channels[]` con la definición distilada de cada canal:
+`channel_id`, `name`, `revision`, `source` (conector de origen) y `destinations[]` (uno o más
+conectores de destino — si el canal tiene varios destination connectors, todos viajan en la
+lista).
+
+Forma de `source`/cada entrada de `destinations[]`: `{transport, endpoint, host, port,
+target_channel_id}`. `endpoint` es una representación saneada (recortada a 160 caracteres, sin
+`password=`/`pwd=`/`user=`/`uid=` de connection strings jdbc, sin userinfo `usuario:clave@` de
+URLs) — **nunca se manda `properties` de Mirth tal cual**, ahí adentro pueden viajar
+credenciales de Database Reader/Writer o HTTP Sender con auth. `target_channel_id` solo viene
+poblado cuando el conector es un "Channel Writer" apuntando a otro canal (routing interno
+entre canales de la misma instancia) — en ese caso `endpoint`/`host`/`port` quedan en `null`.
+Un tipo de conector no contemplado en la whitelist (custom, o uno nuevo de una versión de
+Mirth no probada) sale igual, con `transport` poblado y el resto en `null`, nunca tira
+excepción.
+
+**Cache de 1 hora por instancia** (`mirth_collector.CACHE_TOPO_TTL_SEG`, constante en código,
+no configurable desde la GUI): `GET /api/channels` puede pesar varios MB en una instancia con
+muchos canales/transformers, y la topología cambia rarísima vez — no vale la pena pegarle en
+cada ciclo. Se refresca antes de que venza el TTL si el set de `channel_id` que devolvió
+`/statuses` **este ciclo** difiere del que se ve la última vez que se leyó la topología (canal
+nuevo o borrado detectado de inmediato). Si el fetch falla, se manda la última copia cacheada
+si existe; si nunca se pudo leer, la instancia se omite de `mirth_topology` ese ciclo sin
+afectar el resto del reporte.
+
+**Nada de esto tiene un toggle nuevo en la GUI del agente** — se activa automáticamente junto
+con `enabled_mirth` + `mirth_servers[]`, que ya existían.
 
 ## 8. `collection_meta` — clave que el agente manda y no está en el contrato de ingesta
 

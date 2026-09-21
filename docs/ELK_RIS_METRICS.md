@@ -115,7 +115,7 @@ es **"Al iniciar el equipo"**, sin desencadenador de repetición.
 | `rol` | string | mismo `lsRole.Description` que `SQL_QUERY.users` |
 | `hour_start` | date | ídem |
 | `inicios_sesion` | integer | `COUNT(a.GUID)` acotado a esa hora — **sí es aditivo**, se suma sin problema |
-| `user_guids` | array de string | `User_GUID` **distintos** logueados esa hora para ese rol — **no** un conteo (ver arriba) |
+| `user_guids` | array de string | `User_GUID` **distintos** logueados esa hora para ese rol — **no** un conteo (ver arriba). ⚠️ En la práctica puede llegar como **string suelto** (no envuelto en `[...]`) cuando hubo un único GUID esa hora para ese rol — `STRING_AGG` no deja coma que partir y el `mutate.split` de `ext_users_metrics.conf` no siempre lo deja como lista de un elemento. El agente lo tolera desde `4.5.1` (`_normalizar_user_guids` en `agent_logic.py`, corre antes de validar); antes de ese fix el bloque horario entero quedaba rechazado y el checkpoint nunca avanzaba (visto en producción, hospital P03, 2026-09-18). No se tocó el `.conf` — arreglarlo ahí requeriría redesplegar Logstash en cada hospital afectado. |
 
 ## Los `.conf` y `.bat` (`/elk`)
 
@@ -170,21 +170,33 @@ hospital que estés configurando, pueden variar de un sitio a otro.
 - ⏳ `ext_dicom_queues.conf` — SQL confirmado en otra instalación real (otro hospital), pero
   **sin probar todavía en este sitio**.
 
-### Pendiente para retomar (no bloqueante, quedó frenado acá por el fin de semana)
+**Segundo hospital, ya con Tareas Programadas reales (`2026-09-16`):** los 3 puntos ⏳ de
+arriba quedaron confirmados acá — `ext_pacs_metrics.conf`, `ext_users_metrics.conf` (incluido
+el `STRING_AGG`) y `ext_dicom_queues.conf` corrieron sin ningún `ERROR` en el log de Logstash,
+tanto a mano como disparados por `TecnoMonitor_Tiempo_Real`/`TecnoMonitor_KPIs_Negocio` reales.
+Los índices de RIS y usuarios no aparecían al principio (`404` al testear desde la GUI) — se
+confirmó con una query directa en SQL Server que la hora evaluada tenía **0 filas reales**, no
+un problema del pipeline: Elastic no crea un índice hasta que Logstash escribe su primer
+documento. Ese mismo caso reveló un bug real en el agente (`_buscar_bucket_horario` trataba ese
+`404` como error de conexión en vez de "0 documentos", ver [CHANGELOG.md](./CHANGELOG.md)) —
+corregido. Detalle completo de los dos problemas encontrados (uno del Programador de Tareas, uno
+del agente) en la sección de troubleshooting más abajo.
 
-1. Probar `ext_pacs_metrics.conf`, `ext_users_metrics.conf` y `ext_dicom_queues.conf` a mano,
-   igual que se hizo con `ext_ris_metrics.conf` (`CALL logstash.bat -f <archivo>.conf`,
-   confirmar el índice correspondiente en Elasticsearch).
-2. Crear las Tareas Programadas de los cajones ya definidos (`ext_tiempo_real-all-sito.bat`
-   cada 5 min, `ext_kpis_negocio-all-sito.bat` cada 1 hora; `ext_al_reinicio-all-sito.bat`
-   queda para cuando se decida qué `.conf` va ahí) — ver la sección de instalación más abajo
-   para el procedimiento de exportar/importar una tarea existente como base.
-3. Dejar correr al menos un ciclo completo vía la Tarea Programada (no a mano) para confirmar
-   que el `JAVA_HOME` limpio y las rutas funcionan igual cuando lo dispara el Programador de
-   Tareas, no solo desde una consola interactiva.
-4. Recién ahí, activar `enabled_ris_metrics` (y `enabled_dicom_routing` si corresponde) en la
-   GUI del agente para este hospital y confirmar en `activity.log` que el ciclo del agente
-   levanta los datos correctamente (buscar `⚙️ RIS/Elastic: Extrayendo bloque regular`).
+### Pendiente para retomar
+
+1. ✅ Probar `ext_pacs_metrics.conf`, `ext_users_metrics.conf` y `ext_dicom_queues.conf` a mano —
+   hecho en el segundo hospital (`2026-09-16`).
+2. ✅ Crear las Tareas Programadas de los cajones ya definidos (`ext_tiempo_real-all-sito.bat`
+   cada 5 min, `ext_kpis_negocio-all-sito.bat` cada 1 hora) — hecho. `ext_al_reinicio-all-sito.bat`
+   sigue sin tarea propia, pendiente de decidir qué `.conf` va ahí.
+3. ✅ Dejar correr al menos un ciclo completo vía la Tarea Programada (no a mano) — confirmado
+   para ambas tareas tras corregir la condición de energía (ver troubleshooting §3 abajo).
+4. Activar `enabled_ris_metrics` (y `enabled_dicom_routing` si corresponde) en la GUI del agente
+   para este hospital, **guardar los cambios del hospital**, y confirmar en `activity.log` que
+   el ciclo del agente levanta los datos correctamente (buscar `⚙️ RIS/Elastic: Extrayendo
+   bloque regular`) — sigue pendiente, los botones de "Test" ya dieron OK para los 4 índices
+   pero falta confirmar que quedó guardado y corriendo en un ciclo real del agente (no solo el
+   test manual de conexión).
 
 ## Troubleshooting — problemas reales encontrados en el hospital piloto
 
@@ -254,6 +266,36 @@ no existía. **Fix aplicado:** crear esa carpeta a mano (`AppData\Local\Temp\ela
 grupo, o un reseteo de perfil pueden volver a borrarla. La alternativa más robusta es fijar la
 variable `ES_TMPDIR` a una carpeta dedicada dentro de la propia instalación de Elasticsearch
 (ej. `<ES_HOME>\temp`), en vez de depender del `AppData` de una cuenta de servicio.
+
+### 3. Las Tareas Programadas corren bien a mano ("Run") pero nunca disparan solas
+
+Encontrado al armar `TecnoMonitor_Tiempo_Real`/`TecnoMonitor_KPIs_Negocio` en un hospital real
+(`2026-09-16`), importando una tarea `ext_*-sito-vw.bat` existente como plantilla (ver
+"Instalar los pipelines nuevos" más abajo). Síntoma: el trigger se ve bien configurado
+(`Daily`, `Repeat task every 5 minutes, for a duration of: Indefinitely`, `Enabled`), corre sin
+error cuando se lo dispara a mano con clic derecho → **Run**, pero el **`Next Run Time`** de la
+lista principal sigue avanzando solo (cada 5 min, cada 1 hora) sin que aparezca ninguna corrida
+nueva en el **History** — ni siquiera un intento fallido logueado. Windows descarta el disparo
+en silencio y reprograma el siguiente.
+
+**Causa:** la plantilla usada como base trae, en la pestaña **Conditions**, tildado **"Start the
+task only if the computer is on AC power"** — el default de Windows para tareas nuevas, pensado
+para notebooks, sin sentido en un servidor. Combinado con **"Run task as soon as possible after
+a scheduled start is missed"** destildado (pestaña **Settings**, también default), cualquier
+disparo que no pueda cumplir la condición de energía se **pierde sin reintentarlo y sin dejar
+rastro** en el Event Log — no aparece ni como corrida exitosa ni como fallida.
+
+**Fix aplicado:** en cada tarea nueva creada a partir de una plantilla existente,
+1. **Conditions** → destildar "Start the task only if the computer is on AC power" (y de paso
+   "Stop if the computer switches to battery power", que queda irrelevante).
+2. **Settings** → tildar "Run task as soon as possible after a scheduled start is missed", como
+   red de seguridad adicional por si alguna vez vuelve a chocar con la regla "Do not start a new
+   instance" (default de "If the task is already running...").
+
+Confirmado con el `History` de ambas tareas: tras el fix, aparecieron corridas nuevas sin que
+nadie tocara "Run". **Revisar esto en cada hospital nuevo** al exportar/importar una tarea
+existente como base — no es evidente en la pestaña General/Triggers, hay que entrar
+específicamente a Conditions.
 
 ## Instalar los pipelines nuevos en un hospital
 

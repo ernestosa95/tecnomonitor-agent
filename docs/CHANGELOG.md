@@ -7,6 +7,48 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
+## v4.5.1
+
+- **`mirth_collector.py`: topología de canales para el mapa de integraciones.** Agrega una
+  llamada nueva a `GET /api/channels` (definición del canal: conector de origen, conectores de
+  destino, y si alguno es un "Channel Writer", a qué otro canal apunta) además de las que ya
+  existían (`/statistics`, `/statuses`). Se manda como clave nueva `mirth_topology`, hermana de
+  `mirth[]` — no reemplaza nada de lo que ya se mandaba. Cacheada 1 hora por instancia
+  (`CACHE_TOPO_TTL_SEG`), con refresco anticipado si cambia el set de canales reportados. Nunca
+  serializa `properties` de Mirth tal cual (puede traer credenciales de Database Reader/Writer
+  o HTTP Sender); los endpoints van saneados. No agrega ningún control nuevo a la GUI del
+  agente — se activa junto con `enabled_mirth`, que ya existía. Ver
+  [CONTRATO_AGENTE.md §7bis](./CONTRATO_AGENTE.md#7bis-mirth-y-mirth_topology--extendidos-para-el-mapa-de-integraciones-mirth_collectorpy).
+- **`mirth[instancia][]` gana `channel_id` y `errored`** (número propio, separado del string
+  `last_error`). Retrocompatible: son campos agregados, no se saca ni se renombra nada.
+- **Fix: una falla en el logout de Mirth ya no descarta la telemetría recolectada ese ciclo.**
+  Antes, login+estadísticas+estados+logout vivían en el mismo bloque `try`; si el logout (con
+  el timeout más corto de los cuatro, 5s) tiraba una excepción, se perdía todo lo ya juntado y
+  se reemplazaba por un canal sintético `SYSTEM_ERROR` — que además podía disparar una alerta
+  CRITICAL falsa del lado servidor sobre un Mirth que en realidad estaba sano. El logout ahora
+  vive en su propio `try/except` dentro de un `finally`, aislado de la recolección.
+- `agent_version`/`schema_version`: sube el patch (`4.5.0` → `4.5.1`); `schema_version`
+  (major.minor) **no cambia**, sigue en `"4.5"` — este release no toca nada del gate de
+  autenticación de ingesta.
+- **Fix: `application_metrics` vía Elastic quedaba trabado para siempre cuando un rol tenía
+  exactamente un usuario logueado en una hora puntual.** Encontrado en producción
+  (hospital P03, 2026-09-18): `ext_users_metrics_hourly` (armado por
+  `elk/ext_users_metrics.conf` con `STRING_AGG` + `mutate.split` en Logstash) manda
+  `user_guids` como lista salvo cuando hay un único GUID sin coma que partir — ahí llega
+  como string suelto. La validación de `extraer_metricas_ris_elastic` (a propósito, para no
+  contar mal un bloque corrupto) rechazaba el bloque entero (`ris`+`pacs`+`users` juntos,
+  todo o nada) cada vez que pasaba esto, y como el checkpoint solo avanza tras un bloque
+  válido, el agente quedaba reintentando ese mismo bloque horario para siempre — sin mandar
+  ningún dato de negocio nuevo hasta que alguien lo notara. `_normalizar_user_guids` (nueva,
+  llamada antes de validar) envuelve el string suelto en una lista de un elemento: es una
+  variante legítima del dato (un usuario), no una corrupción real.
+- **Fix: el banner de arranque del servicio (`headless_service.py`) mostraba `v4.5.0`
+  hardcodeado**, sin relación con `/VERSION` — quedó así desde antes de que `agent_logic.py`
+  centralizara el versionado (ver `BUILD.md#versionado`). Ahora lee `agent_logic.AGENT_VERSION`,
+  igual que el resto del agente. Si viste `v4.5.0` en un log después de actualizar el agente,
+  era este bug, no que el build no haya tomado los cambios — confirmá la versión real con el
+  contenido de `/VERSION` en el instalador, no con ese log.
+
 ## v4.5.0
 
 - **El instalador pregunta el modo de ejecución: Servicio de Windows o Tarea Programada.**
@@ -62,6 +104,27 @@ como está.
   (sin `schedule =>` interno, siguiendo la convención real de ese sitio) y se agrupó
   `ext_ris_metrics`/`ext_pacs_metrics`/`ext_users_metrics` en un solo `.bat`/Tarea Programada
   en vez de tres.
+- **Tareas Programadas de los 2 cajones con `.conf` ya definido, creadas y validadas en el
+  primer hospital real** (`2026-09-16`): `TecnoMonitor_Tiempo_Real` (cada 5 min,
+  `ext_dicom_queues.conf`) y `TecnoMonitor_KPIs_Negocio` (cada 1 hora, los 3 `.conf` de
+  negocio). Al armarlas se encontró que corrían bien a mano (botón "Run") pero nunca disparaban
+  solas: la combinación de la condición **"Start the task only if the computer is on AC
+  power"** (tildada por default en tareas nuevas, heredada de la plantilla usada como base) con
+  **"Run task as soon as possible after a scheduled start is missed"** destildada hace que
+  Windows descarte en silencio cualquier disparo que no pueda cumplir la condición, sin dejar
+  rastro en el Event Log — reprograma el próximo horario y sigue. Se resolvió destildando la
+  condición de energía y tildando esa opción de recuperación en ambas tareas. Documentado en
+  [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md#troubleshooting--problemas-reales-encontrados-en-el-hospital-piloto)
+  junto con el resto de la troubleshooting real de puesta en marcha.
+- **Fix: `extraer_metricas_ris_elastic` fallaba entero si un solo índice horario todavía no
+  existía.** Encontrado en el mismo despliegue: mientras un índice (ej.
+  `ext_ris_metrics_hourly`) no recibe su primer documento -- normal en una hora sin
+  admitidos/ejecutados/logins, Elastic ni siquiera lo crea -- el `_search` devuelve `404`, que
+  `_buscar_bucket_horario` dejaba propagar como excepción. Eso cortaba también la consulta de
+  los otros dos índices (aunque tuvieran datos listos) y el checkpoint nunca avanzaba,
+  reintentando el mismo bloque con un error de log en cada ciclo indefinidamente. Ahora un
+  `404` se trata como "0 documentos" igual que una lista vacía, sin loguear error ni bloquear
+  los demás índices.
 
 Detalle completo de todo lo anterior en [PLAN_MEJORAS_V4.5.md](./PLAN_MEJORAS_V4.5.md).
 
