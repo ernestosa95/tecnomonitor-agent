@@ -1,4 +1,4 @@
-REM Integridad de bases SQL Server (DBCC CHECKDB) tras un reinicio -- cadencia cada 15 min.
+REM Integridad de bases SQL Server (DBCC CHECKDB) tras un reinicio -- cadencia cada 30 min.
 REM Este cajon SOLO DECIDE si hubo un reinicio nuevo (consulta barata); el CHECKDB, que puede
 REM durar horas, corre unicamente si lo hubo -- ver ext_checkdb.conf y
 REM docs/PLAN_CHECKDB_POST_REINICIO.md.
@@ -8,7 +8,7 @@ REM bloquearia todos los pipelines de 5 minutos (autoenrute DICOM, etc.) durante
 REM datos quedarian obsoletos.
 REM
 REM CONFIGURACION OBLIGATORIA DE LA TAREA PROGRAMADA de este cajon:
-REM   - Repetir cada 15 minutos.
+REM   - Repetir cada 30 minutos.
 REM   - "Si la tarea ya se esta ejecutando" = "No iniciar una instancia nueva" (evita que se
 REM     encimen dos corridas mientras un CHECKDB largo sigue en curso).
 REM

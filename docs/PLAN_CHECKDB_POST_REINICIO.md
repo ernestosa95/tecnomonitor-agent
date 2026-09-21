@@ -52,8 +52,8 @@ un reinicio**, nunca de forma periódica.
    **reintenta solo** si SQL todavía no estaba listo tras un corte de energía.
 4. **Un cajón propio.** Un CHECKDB de horas dentro de `ext_tiempo_real-all-sito.bat` bloquearía
    todos los pipelines de 5 minutos (colas DICOM, etc.), que quedarían con datos obsoletos. El
-   pipeline de integridad va en **su propio `.bat` y su propia tarea programada** (cada 15 min
-   alcanza: solo decide si hay que correr).
+   pipeline de integridad va en **su propio `.bat` y su propia tarea programada** (cada 30 min
+   alcanza: solo decide si hay que correr; un reinicio se chequea entre 10 y 40 min después del arranque de SQL).
 5. **Permisos.** `DBCC CHECKDB` exige `sysadmin` o `db_owner` en cada base, más de lo que hoy
    necesita el agente para los KPIs. Como la credencial es la misma, hay que **ampliarla** donde se
    active; el botón de test de la GUI debe verificarlo.
@@ -87,7 +87,7 @@ Archivos en `elk/`: `ext_checkdb.conf` (con el T-SQL **inline** en su `statement
 `ext_checkdb-all-sito.bat`.
 
 - **Sin `schedule =>`**, como los demás: un ciclo por invocación. Se invoca desde su **propio cajón**
-  (`ext_checkdb-all-sito.bat`, tarea programada cada 15 min con "no iniciar una instancia nueva" si ya
+  (`ext_checkdb-all-sito.bat`, tarea programada cada 30 min con "no iniciar una instancia nueva" si ya
   se está ejecutando) y con su **propio `--path.data`**, porque dos Logstash simultáneos con el mismo
   data dir se bloquean entre sí y este cajón puede encimarse con los de 5 minutos.
 - **Seguimiento numérico** (`use_column_value`, `tracking_column => "sqlserver_start_epoch"`,
@@ -216,7 +216,7 @@ navegador con la API simulada); lo verdaderamente probado contra SQL Server y Lo
    (debe devolver la fila `BASELINE`) y por `1` con `@SoloFisico = 1`, `@EsperaMin = 0` y 1–2 bases chicas en
    `@Bases` (debe devolver una fila por base).
 2. Instalar `ext_checkdb.conf` y `ext_checkdb-all-sito.bat` en el servidor ELK; crear la
-   tarea programada (cada 15 min, sin instancias en paralelo). La primera corrida solo siembra el valor.
+   tarea programada (cada 30 min, sin instancias en paralelo). La primera corrida solo siembra el valor.
 3. Simular un reinicio sin reiniciar la VM: detener la tarea, poner un valor **menor** en el archivo
    `.ext_checkdb_last_run` (por ejemplo `--- 1`) y dejar 1–2 bases chicas y `PHYSICAL_ONLY` en el `statement`.
 4. En la GUI del agente: activar "Integridad de bases (CHECKDB)" en la tarjeta de Elastic y probar el botón

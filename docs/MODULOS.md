@@ -282,7 +282,7 @@ del propio servicio.
 ### Vía Elastic (`recolectar_elastic`) — camino principal
 
 Logstash ejecuta el chequeo y el agente solo lee: el pipeline
-`elk/ext_checkdb.conf` (con el T-SQL inline en su `statement`) corre cada 15 minutos en su **propio cajón** (`ext_checkdb-all-sito.bat`, con su
+`elk/ext_checkdb.conf` (con el T-SQL inline en su `statement`) corre cada 30 minutos en su **propio cajón** (`ext_checkdb-all-sito.bat`, con su
 `--path.data`) y decide **del lado SQL** si hubo un reinicio nuevo comparando el arranque de SQL con el
 último procesado (`sqlserver_start_epoch`, columna de seguimiento numérica de Logstash). Así funciona
 esté donde esté Logstash y reintenta solo si SQL tarda en levantar tras un corte. La primera corrida
