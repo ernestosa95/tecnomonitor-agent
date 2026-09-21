@@ -14,6 +14,7 @@ import time
 import webview
 import security
 import agent_logic
+import sql_integrity
 import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
 
 DATA_DIR    = security.get_app_data_path()
@@ -318,6 +319,15 @@ class Api:
     @_requiere_sesion
     def test_ris_metrics_gui(self, data):
         return agent_logic.test_connection_ris_metrics(data)
+
+    # v4.5.2 — chequeo de integridad de bases SQL (DBCC CHECKDB tras un reinicio)
+    @_requiere_sesion
+    def test_checkdb_sql_gui(self, data):
+        return sql_integrity.test_conexion_sql(data)
+
+    @_requiere_sesion
+    def test_checkdb_index_gui(self, data):
+        return sql_integrity.test_conexion_indice(data)
 
 
 # ---------------------------------------------------------------------------

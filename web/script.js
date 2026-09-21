@@ -307,6 +307,11 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('sql_exec_day').value   = sql.executions_per_day || 3;
     document.getElementById('sql_start_date').value = sql.historical_start_date || '';
     document.getElementById('sql_enabled_dicom_routing').checked = !!sql.enabled_dicom_routing;
+    // Integridad de bases (DBCC CHECKDB) directo a SQL — v4.5.2
+    document.getElementById('sql_enabled_checkdb').checked = !!sql.enabled_checkdb;
+    document.getElementById('sql_checkdb_type').value      = sql.checkdb_type === 'physical_only' ? 'physical_only' : 'full';
+    document.getElementById('sql_checkdb_settle').value    = sql.checkdb_settle_minutes ?? 10;
+    document.getElementById('sql_checkdb_databases').value = (sql.checkdb_databases || []).join('\n');
 
     // Mirth — mismo patrón tarjeta + modal que los equipos.
     _limpiarListaDinamica('mirth_list');
@@ -331,6 +336,9 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('elastic_enabled_logs').checked = el.enabled_logs !== false;
     document.getElementById('elastic_dicom_index').value   = el.dicom_index || 'ext_dicom_queues';
     document.getElementById('elastic_dicom_max_age').value = el.dicom_max_age_minutes || 15;
+    // Integridad de bases (DBCC CHECKDB) vía Elastic — v4.5.2
+    document.getElementById('elastic_enabled_checkdb').checked = !!el.enabled_checkdb;
+    document.getElementById('elastic_checkdb_index').value     = el.checkdb_index || 'ext_checkdb';
 
     document.getElementById('elastic_ris_exec_day').value    = el.ris_executions_per_day || 3;
     document.getElementById('elastic_ris_start_date').value  = el.ris_historical_start_date || '';
@@ -432,6 +440,10 @@ function _armarPerfilDesdeFormulario() {
             executions_per_day:    parseInt(document.getElementById('sql_exec_day').value) || 3,
             historical_start_date: document.getElementById('sql_start_date').value,
             enabled_dicom_routing: document.getElementById('sql_enabled_dicom_routing').checked,
+            enabled_checkdb:       document.getElementById('sql_enabled_checkdb').checked,
+            checkdb_type:          document.getElementById('sql_checkdb_type').value,
+            checkdb_settle_minutes: _leerEsperaCheckdbDesdeUI(),
+            checkdb_databases:     _leerBasesCheckdbDesdeUI(),
         },
 
         enabled_vms: modulosActivos.includes('vms'),
@@ -456,6 +468,9 @@ function _armarPerfilDesdeFormulario() {
             enabled_dicom_routing:  document.getElementById('enabled_dicom_routing').checked,
             dicom_index:            document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
             dicom_max_age_minutes:  parseInt(document.getElementById('elastic_dicom_max_age').value) || 15,
+
+            enabled_checkdb:        document.getElementById('elastic_enabled_checkdb').checked,
+            checkdb_index:          document.getElementById('elastic_checkdb_index').value.trim() || 'ext_checkdb',
 
             enabled_ris_metrics:      document.getElementById('enabled_ris_metrics').checked,
             ris_executions_per_day:   parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
@@ -1177,6 +1192,7 @@ function _leerConfigElasticDesdeUI() {
         pass:        document.getElementById('elastic_pass').value,
         use_https:   document.getElementById('elastic_use_https').checked,
         dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
+        checkdb_index: document.getElementById('elastic_checkdb_index').value.trim() || 'ext_checkdb',
         ris_index_ris:   document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
         ris_index_pacs:  document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
         ris_index_users: document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
@@ -1252,6 +1268,91 @@ async function testRisMetrics() {
         const res = await pywebview.api.test_ris_metrics_gui(data);
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert(res.success ? `✅ Todo OK:\n${res.msg}` : `❌ Hay problemas:\n${res.msg}`);
+    } catch (e) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("Error de comunicación con Python: " + e);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// INTEGRIDAD DE BASES (DBCC CHECKDB tras un reinicio de SQL Server) — v4.5.2
+// Ver docs/PLAN_CHECKDB_POST_REINICIO.md. Dos caminos: directo a SQL (excepción, tarjeta SQL) y
+// vía Elastic (principal, tarjeta Elastic). Si ambos están activos gana Elastic.
+// ---------------------------------------------------------------------------
+// Las 26 bases de Extensa de la consulta manual (igual que sql_integrity.BASES_POR_DEFECTO).
+const CHECKDB_BASES_POR_DEFECTO = [
+    'AspnetDB', 'DBScheduler', 'DicomedBroker', 'DicomedBrokerStorico', 'DICOMedP@CS',
+    'ExtensaAnalytics', 'ExtensaCardio', 'ExtensaConnect', 'ExtensaCustomPage',
+    'ExtensaDataExport', 'ExtensaGeneric', 'ExtensaHistory', 'ExtensaIntegration',
+    'ExtensaIntegrationGateway', 'ExtensaMPS', 'ExtensaPACS', 'ExtensaPatient',
+    'ExtensaPublication', 'ExtensaRadio', 'ExtensaRT', 'ExtensaVNA', 'ExtensaWarehouse',
+    'eXtensaWRK', 'MediaProducerDB', 'SL_UserAndConfig', 'support',
+];
+
+// Espera tras el arranque de SQL: campo vacío o inválido = 10 min (el default); solo un 0 explícito
+// significa "no esperar".
+function _leerEsperaCheckdbDesdeUI() {
+    const v = parseInt(document.getElementById('sql_checkdb_settle').value);
+    return Number.isNaN(v) ? 10 : Math.max(0, v);
+}
+
+function cargarBasesCheckdbPorDefecto() {
+    document.getElementById('sql_checkdb_databases').value = CHECKDB_BASES_POR_DEFECTO.join('\n');
+}
+
+// Lista de bases desde el textarea (una por línea; también acepta comas o punto y coma).
+// Vacío = el agente usa las 26 por defecto, así que se guarda como lista vacía.
+function _leerBasesCheckdbDesdeUI() {
+    return document.getElementById('sql_checkdb_databases').value
+        .split(/[\n,;]+/).map(b => b.trim()).filter(b => b.length > 0);
+}
+
+async function testSqlCheckdb() {
+    const btn = window.event?.target?.closest('button');
+    let originalText = '<i class="fas fa-plug me-2"></i>Test (permisos y bases)';
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+
+    const data = {
+        host: document.getElementById('sql_host').value.trim(),
+        user: document.getElementById('sql_user').value.trim(),
+        pass: document.getElementById('sql_pass').value,
+        checkdb_databases: _leerBasesCheckdbDesdeUI(),
+    };
+
+    if (!data.host) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("⚠️ Ingresá el host de SQL Server primero (en la tarjeta SQL).");
+        return;
+    }
+
+    try {
+        const res = await pywebview.api.test_checkdb_sql_gui(data);
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("Error de comunicación con Python: " + e);
+    }
+}
+
+async function testCheckdbIndex() {
+    const btn = window.event?.target?.closest('button');
+    let originalText = '<i class="fas fa-plug"></i> Test';
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+
+    const data = _leerConfigElasticDesdeUI();
+
+    if (!data.host) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+
+    try {
+        const res = await pywebview.api.test_checkdb_index_gui(data);
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
     } catch (e) {
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert("Error de comunicación con Python: " + e);

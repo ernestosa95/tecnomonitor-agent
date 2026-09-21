@@ -531,7 +531,7 @@
                     <!-- Mismo patrón tarjeta chica + modal que la tarjeta Elastic: cada
                          sub-ítem del módulo SQL es una tarjeta, no campos siempre desplegados. -->
                     <div class="row g-3 mt-1">
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="modulo-card" onclick="abrirModalModulo('sql_kpis')">
                                 <i class="fas fa-chart-bar text-primary mb-1"></i>
                                 <span class="modulo-titulo">KPIs de Negocio</span>
@@ -540,13 +540,26 @@
                         <!-- Sub-ítem: Autoenrute DICOM directo a SQL (v4.6, restaura el camino
                              que existía hasta v4.3 -- ver docs/PLAN_MEJORAS_V4.5.md). Si la
                              versión vía Elastic también está activa, esa tiene prioridad. -->
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="modulo-card" onclick="abrirModalModulo('sql_dicom_routing')">
                                 <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
                                     <input class="form-check-input" type="checkbox" id="sql_enabled_dicom_routing">
                                 </div>
                                 <i class="fas fa-route text-primary mb-1"></i>
                                 <span class="modulo-titulo">Autoenrute DICOM (directo a SQL)</span>
+                            </div>
+                        </div>
+                        <!-- Sub-ítem (v4.5.2): chequeo de integridad de bases (DBCC CHECKDB) tras un
+                             reinicio de SQL Server, camino DIRECTO. Es la excepción, para hospitales
+                             sin Elastic; si la versión vía Elastic también está activa, esa gana.
+                             Ver docs/PLAN_CHECKDB_POST_REINICIO.md. -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('sql_checkdb')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="sql_enabled_checkdb">
+                                </div>
+                                <i class="fas fa-shield-halved text-primary mb-1"></i>
+                                <span class="modulo-titulo">Integridad de bases (directo a SQL)</span>
                             </div>
                         </div>
                     </div>
@@ -616,6 +629,65 @@
                         Elastic, esa versión tiene prioridad. No tiene campos propios: usa la misma
                         conexión SQL configurada arriba.
                     </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Integridad de bases directo a SQL (sub-ítem de la tarjeta SQL, v4.5.2) -->
+    <div class="modal fade" id="modal_sql_checkdb" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-shield-halved me-2"></i>Integridad de bases (directo a SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Ejecuta <code>DBCC CHECKDB</code> sobre las bases <b>solo cuando SQL Server se reinicia</b>
+                        (típicamente por un corte de energía) y manda el resultado una vez. Es una tarea larga:
+                        corre en un proceso aparte y no frena el resto de las mediciones. <b>Es la excepción</b>:
+                        si el hospital tiene Elastic, usar "Integridad de bases" en la tarjeta de Elastic. Si
+                        ambas están activas, gana la de Elastic. Usa la misma conexión SQL configurada arriba, y
+                        ese usuario necesita ser <b>sysadmin</b> o <b>db_owner</b> de cada base.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small fw-bold">Tipo de chequeo</label>
+                            <select class="form-select" id="sql_checkdb_type">
+                                <option value="full">Completo</option>
+                                <option value="physical_only">Liviano (PHYSICAL_ONLY)</option>
+                            </select>
+                            <small class="text-muted d-block mt-1">
+                                Completo = como la consulta manual. El liviano es mucho más rápido pero no detecta problemas lógicos.
+                            </small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label text-muted small fw-bold">Espera tras el arranque (min)</label>
+                            <input type="number" class="form-control" id="sql_checkdb_settle" value="10" min="0">
+                            <small class="text-muted d-block mt-1">
+                                Tiempo para que SQL termine de recuperar sus bases antes de chequear.
+                            </small>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-start justify-content-end">
+                            <button class="btn btn-warning text-white shadow-sm mt-4" onclick="testSqlCheckdb()">
+                                <i class="fas fa-plug me-2"></i>Test (permisos y bases)
+                            </button>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label text-muted small fw-bold">Bases a chequear (una por línea)</label>
+                            <textarea class="form-control font-monospace" id="sql_checkdb_databases" rows="6"
+                                      placeholder="Vacío = las 26 bases de Extensa por defecto"></textarea>
+                            <div class="d-flex justify-content-between align-items-center mt-1">
+                                <small class="text-muted">
+                                    Las que no existan en el servidor se ignoran. Se pueden agregar más.
+                                </small>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="cargarBasesCheckdbPorDefecto()">
+                                    Cargar las 26 por defecto
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -752,6 +824,17 @@
                                 <span class="modulo-titulo">KPIs de RIS vía Elastic</span>
                             </div>
                         </div>
+                        <!-- Sub-ítem (v4.5.2): integridad de bases (DBCC CHECKDB) tras un reinicio de SQL,
+                             camino PRINCIPAL vía Logstash (elk/ext_checkdb.*). Gana sobre el directo a SQL. -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('elastic_checkdb')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="elastic_enabled_checkdb">
+                                </div>
+                                <i class="fas fa-shield-halved text-primary mb-1"></i>
+                                <span class="modulo-titulo">Integridad de bases (CHECKDB)</span>
+                            </div>
+                        </div>
 
                     </div>
                 </div>
@@ -818,6 +901,42 @@
                         </div>
                         <div class="col-md-2 d-flex align-items-start">
                             <button class="btn btn-warning text-white w-100 mt-4" onclick="testDicomIndex()">
+                                <i class="fas fa-plug"></i> Test
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Integridad de bases vía Elastic (sub-ítem de la tarjeta Elastic, v4.5.2) -->
+    <div class="modal fade" id="modal_elastic_checkdb" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-shield-halved me-2"></i>Integridad de bases (CHECKDB, vía Elastic)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Lee el resultado del <code>DBCC CHECKDB</code> que Logstash ejecuta cuando SQL Server se
+                        reinicia (pipeline <code>ext_checkdb</code>, ver la carpeta <code>elk/</code>) y lo manda
+                        una sola vez por reinicio. <b>El tipo de chequeo (completo o liviano) y la lista de bases
+                        se editan en <code>ext_checkdb.sql</code></b> del servidor ELK, no acá. Requiere permiso
+                        de lectura sobre ese índice para el usuario configurado en la tarjeta de Elastic.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label text-muted small fw-bold">Índice de integridad</label>
+                            <input type="text" class="form-control" id="elastic_checkdb_index"
+                                   placeholder="ext_checkdb" value="ext_checkdb">
+                            <small class="text-muted d-block mt-1">
+                                Un documento por base y por reinicio (no se pisa el historial).
+                            </small>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-start">
+                            <button class="btn btn-warning text-white w-100 mt-4" onclick="testCheckdbIndex()">
                                 <i class="fas fa-plug"></i> Test
                             </button>
                         </div>
