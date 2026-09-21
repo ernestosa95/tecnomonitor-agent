@@ -3,7 +3,7 @@
 ; IDE de Inno Setup (sin pasar por build.bat), cae a este default en vez de
 ; fallar la compilación por una macro sin definir.
 #ifndef MyAppVersion
-  #define MyAppVersion "4.5.0"
+  #define MyAppVersion "4.5.2"
 #endif
 
 [Setup]
