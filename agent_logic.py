@@ -87,7 +87,7 @@ def _leer_version():
                 return valor
     except Exception:
         pass
-    return "4.5.0"
+    return "4.5.1"
 
 
 AGENT_VERSION  = _leer_version()
@@ -481,6 +481,14 @@ def desencriptar_config(data: dict) -> dict:
         # default.
         de_perfil = next((p.get("central_url") for p in data.get("instalaciones", []) if p.get("central_url")), None)
         data["central_url"] = de_perfil or DEFAULT_CENTRAL_URL
+    # Se sincroniza a cada perfil (igual que encriptar_config al guardar):
+    # ejecutar_ciclo_agente recibe el perfil suelto, no la config raíz, y lee
+    # config.get("central_url") de ahí — si central_url vive solo en la raíz
+    # (p.ej. recién migrada desde formato plano, donde migrar_config_legacy
+    # la saca del perfil), el envío al servidor central falla con
+    # "Invalid URL 'None'".
+    for perfil in data.get("instalaciones", []):
+        perfil["central_url"] = data["central_url"]
     data["instalaciones"] = [_desencriptar_perfil(p) for p in data.get("instalaciones", [])]
     return data
 
@@ -751,6 +759,14 @@ def _buscar_bucket_horario(elastic_cfg, index_name, campo_fecha, desde, hasta, l
             payload["search_after"] = search_after
 
         resp = requests.post(url, json=payload, auth=auth, timeout=15, verify=False)
+        if resp.status_code == 404:
+            # Índice todavía no existe -- Logstash recién lo crea al escribir
+            # su primer documento (ej. esa hora nunca tuvo datos todavía en
+            # este hospital). Tratar como "sin documentos", no como error de
+            # conexión: si no, extraer_metricas_ris_elastic loguea error cada
+            # ciclo sin nunca avanzar el checkpoint, y además corta la
+            # consulta de los otros 2 índices aunque sí tengan datos listos.
+            break
         resp.raise_for_status()
         hits = resp.json().get("hits", {}).get("hits", [])
         if not hits:
@@ -786,6 +802,26 @@ def _sumar_horas_pacs(docs):
             acumulado[clave] = {"aet": doc.get("aet"), "mod": doc.get("mod"), "almacenados": 0}
         acumulado[clave]["almacenados"] += safe_int(doc.get("almacenados"))
     return list(acumulado.values())
+
+
+def _normalizar_user_guids(docs):
+    """
+    `user_guids` debería llegar siempre como lista, pero cuando en SQL Server
+    (elk/ext_users_metrics.conf, STRING_AGG) hubo un único usuario logueado
+    para ese rol en esa hora, no hay coma que partir -- en ese caso el
+    pipeline de Logstash puede dejar el campo como string suelto en vez de
+    lista de un elemento. Es una variante legítima del dato (un usuario),
+    no una corrupción: sin esto, `_validar_item` rechazaba el bloque
+    horario entero (ris+pacs+users juntos, todo o nada) cada vez que
+    pasaba, y como el checkpoint solo avanza tras un bloque válido, el
+    agente quedaba reintentando ese mismo bloque para siempre sin mandar
+    ningún dato de negocio nuevo. Muta los docs in-place (son dicts sueltos
+    recién parseados de la respuesta de Elastic, no se reusan en otro lado).
+    """
+    for doc in docs:
+        if isinstance(doc, dict) and isinstance(doc.get("user_guids"), str):
+            doc["user_guids"] = [doc["user_guids"]]
+    return docs
 
 
 def _sumar_horas_users(docs):
@@ -844,6 +880,7 @@ def extraer_metricas_ris_elastic(elastic_cfg, hospital_id, log_func=None):
         docs_ris   = _buscar_bucket_horario(elastic_cfg, idx_ris,   "hour_start", target_start_time, target_end_time, log_func)
         docs_pacs  = _buscar_bucket_horario(elastic_cfg, idx_pacs,  "hour_start", target_start_time, target_end_time, log_func)
         docs_users = _buscar_bucket_horario(elastic_cfg, idx_users, "hour_start", target_start_time, target_end_time, log_func)
+        _normalizar_user_guids(docs_users)
     except Exception as e:
         if log_func:
             log_func(f"❌ Error consultando ElasticSearch (RIS/PACS/users): {e}")
@@ -2575,8 +2612,10 @@ def ejecutar_ciclo_agente(config, log_callback=None):
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):
         # Llamamos a mirth_collector en lugar de la función local
-        mirth_data, m_status, m_errors = mirth_collector.recolectar_mirth(config["mirth_servers"], log_callback)
+        mirth_data, m_status, m_errors, mirth_topo = mirth_collector.recolectar_mirth(config["mirth_servers"], log_callback)
         reporte["software_monitoring"]["mirth"] = mirth_data
+        if mirth_topo:
+            reporte["software_monitoring"]["mirth_topology"] = mirth_topo
         collection_meta["mirth"]["status"] = m_status
         collection_meta["mirth"]["total"]  = len(config["mirth_servers"])
         collection_meta["mirth"]["errors"] = m_errors

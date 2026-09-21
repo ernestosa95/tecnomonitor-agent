@@ -16,7 +16,7 @@ import agent_logic
 
 
 def test_version_unica_leida_de_version_file():
-    assert agent_logic.AGENT_VERSION == "4.5.0"
+    assert agent_logic.AGENT_VERSION == "4.5.1"
     assert agent_logic.SCHEMA_VERSION == "4.5", "major.minor derivado de AGENT_VERSION"
 
 

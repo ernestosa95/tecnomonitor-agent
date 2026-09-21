@@ -442,7 +442,7 @@ class TecnoMonitorService(win32serviceutil.ServiceFramework):
     def SvcDoRun(self):
         self.ReportServiceStatus(win32service.SERVICE_RUNNING)
         log_evento_windows("Servicio iniciado.")
-        log("🚀 TecnoMonitor Service v4.5.0 — Iniciando (modo servicio de Windows)")
+        log(f"🚀 TecnoMonitor Service v{agent_logic.AGENT_VERSION} — Iniciando (modo servicio de Windows)")
 
         # Migración: agente v4.3 sobreviviente
         if detectar_agente_legacy():
@@ -528,7 +528,7 @@ if __name__ == '__main__':
         # task_control.py) — a propósito NO hay un `while True` acá: eso es
         # justamente lo que le daba problemas a la tarea programada de v4.3
         # (candado por socket que quedaba en TIME_WAIT).
-        log("🚀 TecnoMonitor Service v4.5.0 — Iniciando (modo tarea programada, --run-once)")
+        log(f"🚀 TecnoMonitor Service v{agent_logic.AGENT_VERSION} — Iniciando (modo tarea programada, --run-once)")
 
         if detectar_agente_legacy():
             msg = ("Se detectó un agente v4.3 todavía en ejecución (puerto 64999 "
