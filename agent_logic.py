@@ -16,6 +16,7 @@ from requests.auth import HTTPBasicAuth
 import security
 import psutil
 import mirth_collector
+import sql_integrity
 import ssl
 from urllib.parse import urlparse
 from cryptography import x509
@@ -2483,6 +2484,8 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "suitestensa_logs": {"enabled": _logs_suitestensa_habilitado(config), "status": "disabled"},
         # --- NUEVO v4.4: permite distinguir "apagado" de "activo sin datos" ---
         "dicom_routing": {"enabled": _dicom_routing_habilitado(config), "status": "disabled"},
+        # --- NUEVO v4.5.2: chequeo de integridad de bases tras un reinicio de SQL Server ---
+        "sql_integrity": {"enabled": sql_integrity.habilitado(config), "status": "disabled"},
     }
 
     reporte = {
@@ -2609,6 +2612,21 @@ def ejecutar_ciclo_agente(config, log_callback=None):
     else:
         reporte["software_monitoring"]["dicom_routing_queues"] = []
 
+    # --- 5.6. Software Monitoring: integridad de bases SQL tras un reinicio (DBCC CHECKDB) ---
+    # Dos caminos (Elastic principal, SQL directo excepción); ver sql_integrity.py y
+    # docs/PLAN_CHECKDB_POST_REINICIO.md. La clave solo viaja UNA vez por reinicio, cuando hay un
+    # resultado nuevo; `commit` lo marca como enviado tras el POST exitoso (igual que los checkpoints).
+    integridad = None
+    if collection_meta["sql_integrity"]["enabled"]:
+        integridad = sql_integrity.recolectar(config, log_callback)
+        meta_si = collection_meta["sql_integrity"]
+        meta_si["status"] = integridad["status"]
+        meta_si.update(integridad["extra"])
+        if integridad["source"]:
+            meta_si["source"] = integridad["source"]
+        if integridad["payload"]:
+            reporte["software_monitoring"]["sql_integrity"] = integridad["payload"]
+
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):
         # Llamamos a mirth_collector en lugar de la función local
@@ -2678,6 +2696,14 @@ def ejecutar_ciclo_agente(config, log_callback=None):
                 save_checkpoint(config.get("hospital_id"), checkpoint_dt, log_func=log_callback)
                 if log_callback:
                     log_callback(f"💾 Checkpoint SQL guardado: {checkpoint_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # --- NUEVO v4.5.2: el resultado de integridad de SQL queda "enviado" solo tras el POST exitoso ---
+        if integridad and integridad.get("commit"):
+            try:
+                integridad["commit"]()
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"⚠️ No se pudo marcar como enviado el resultado de integridad SQL: {e}")
 
         # --- NUEVO v4.3: Checkpoint de ElasticSearch ---
         if "_elastic_checkpoint_to_save" in config:

@@ -47,6 +47,13 @@ Comandos modo Tarea Programada (v4.5.0, ver task_control.py):
 Diagnóstico (v4.6, no requiere detener el servicio):
     TecnoMonitorService.exe --selftest   (prueba conectividad de cada hospital/módulo
                                            configurado, sin mandar ningún reporte real)
+
+Interno (v4.5.2) — no se lanza a mano:
+    TecnoMonitorService.exe --sql-integrity-worker <hospital_id>
+                                          (proceso trabajador del chequeo de integridad de
+                                           bases SQL, DBCC CHECKDB; lo lanza el propio ciclo
+                                           del agente ante un reinicio de SQL Server — ver
+                                           sql_integrity.py)
 """
 
 import sys
@@ -93,6 +100,7 @@ import win32timezone  # noqa: F401  — import explícito: PyInstaller no lo det
 
 import security
 import agent_logic
+import sql_integrity
 from agent_logic import ejecutar_ciclo_agente
 
 # ---------------------------------------------------------------------------
@@ -555,6 +563,25 @@ if __name__ == '__main__':
         finally:
             liberar_candado()
             log("👋 Ciclo de tarea programada finalizado.\n")
+
+    elif sys.argv[1] == '--sql-integrity-worker':
+        # v4.5.2 — trabajador desacoplado del chequeo de integridad de bases SQL (DBCC CHECKDB).
+        # Lo lanza el ciclo del agente (sql_integrity.recolectar_sql) cuando detecta un reinicio de
+        # SQL Server, para que el chequeo -- que puede durar horas -- sobreviva al ciclo, incluso en
+        # modo Tarea Programada donde cada ciclo es un proceso efímero. NO toma el candado de
+        # instancia única del agente (es un proceso aparte a propósito) y escribe en su propio log
+        # (sql_integrity_worker.log), no en activity.log.
+        hid_worker = sys.argv[2] if len(sys.argv) > 2 else None
+        try:
+            cfg_worker = cargar_config_segura() or {}
+            perfil_worker = next((p for p in cfg_worker.get("instalaciones", [])
+                                  if p.get("hospital_id") == hid_worker), None)
+            if perfil_worker is None:
+                sql_integrity._log_worker(f"[{hid_worker}] Hospital no encontrado en la configuración; el trabajador termina.")
+            else:
+                sql_integrity.trabajador_main(perfil_worker)
+        except Exception:
+            sql_integrity._log_worker(f"[{hid_worker}] 💥 Excepción no controlada en el trabajador:\n{traceback.format_exc()}")
 
     elif sys.argv[1] == '--selftest':
         # Diagnóstico manual para un técnico en sitio: prueba conectividad
