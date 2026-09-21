@@ -281,8 +281,8 @@ del propio servicio.
 
 ### Vía Elastic (`recolectar_elastic`) — camino principal
 
-Logstash ejecuta el chequeo y el agente solo lee: el pipeline `elk/ext_checkdb.conf` +
-`elk/ext_checkdb.sql` corre cada 15 minutos en su **propio cajón** (`ext_checkdb-all-sito.bat`, con su
+Logstash ejecuta el chequeo y el agente solo lee: el pipeline
+`elk/ext_checkdb.conf` (con el T-SQL inline en su `statement`) corre cada 15 minutos en su **propio cajón** (`ext_checkdb-all-sito.bat`, con su
 `--path.data`) y decide **del lado SQL** si hubo un reinicio nuevo comparando el arranque de SQL con el
 último procesado (`sqlserver_start_epoch`, columna de seguimiento numérica de Logstash). Así funciona
 esté donde esté Logstash y reintenta solo si SQL tarda en levantar tras un corte. La primera corrida
@@ -291,7 +291,7 @@ solo siembra el valor (fila `BASELINE`, no indexada): **no chequea nada al insta
 El agente lee `elastic.checkdb_index` (default `ext_checkdb`), toma los documentos del **arranque más
 reciente** y los reenvía una vez (`last_sent_epoch` en su estado). Un índice inexistente es `empty`
 (todavía nunca hubo un reinicio chequeado), no un error. El tipo de chequeo (`full`/`physical_only`) y la
-lista de bases se editan en `ext_checkdb.sql`.
+lista de bases se editan en `ext_checkdb.conf`.
 
 ### Directo a SQL (`recolectar_sql`) — la excepción
 

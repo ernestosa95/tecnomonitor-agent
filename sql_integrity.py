@@ -7,7 +7,7 @@ corte de energía abrupto -- y el resultado se manda UNA sola vez por reinicio, 
 
 Dos caminos independientes (mismo criterio que autoenrute DICOM y los KPIs de RIS):
 
-  * Elastic (principal): Logstash corre el CHECKDB (elk/ext_checkdb.conf + .sql) y decide del
+  * Elastic (principal): Logstash corre el CHECKDB (elk/ext_checkdb.conf, con el T-SQL inline) y decide del
     lado SQL si hubo un reinicio; el agente solo lee el índice y reenvía el último resultado.
   * SQL directo (excepción, hospitales sin Elastic): el agente detecta el reinicio y lanza un
     PROCESO TRABAJADOR desacoplado, porque el CHECKDB dura mucho más que un ciclo y en modo

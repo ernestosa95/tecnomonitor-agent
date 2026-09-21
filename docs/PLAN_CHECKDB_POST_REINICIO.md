@@ -76,14 +76,15 @@ un reinicio**, nunca de forma periódica.
 | | Elastic (principal) | SQL directo (excepción) |
 |---|---|---|
 | Habilita | `enabled_elastic` + `elastic.enabled_checkdb` | `enabled_sql` + `sql.enabled_checkdb` |
-| Quién ejecuta el CHECKDB | Logstash (`elk/ext_checkdb.conf` + `.sql`) | Proceso trabajador del agente |
+| Quién ejecuta el CHECKDB | Logstash (`elk/ext_checkdb.conf`, T-SQL inline) | Proceso trabajador del agente |
 | Quién decide que hubo reinicio | El pipeline, en SQL (`sqlserver_start_time` vs. `:sql_last_value`) | El agente, comparando contra su estado en disco |
-| Tipo de chequeo y lista de bases | En el `.sql` del pipeline (editable) | `sql.checkdb_type`, `sql.checkdb_databases` |
+| Tipo de chequeo y lista de bases | En el bloque CONFIGURACIÓN del `statement` de `ext_checkdb.conf` (editable) | `sql.checkdb_type`, `sql.checkdb_databases` |
 | Qué hace el agente | Lee el índice y reenvía el último resultado | Detecta, lanza el trabajador y reenvía el resultado |
 
 ### 4.2 Pipeline de Logstash (camino Elastic)
 
-Archivos en `elk/`: `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sito.bat`.
+Archivos en `elk/`: `ext_checkdb.conf` (con el T-SQL **inline** en su `statement`, como los demás pipelines) y
+`ext_checkdb-all-sito.bat`.
 
 - **Sin `schedule =>`**, como los demás: un ciclo por invocación. Se invoca desde su **propio cajón**
   (`ext_checkdb-all-sito.bat`, tarea programada cada 15 min con "no iniciar una instancia nueva" si ya
@@ -94,7 +95,7 @@ Archivos en `elk/`: `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sit
   segundos desde 1970. Es numérico y sale del propio SQL, así que no depende de zonas horarias ni de
   en qué VM corra Logstash. El `last_run_metadata_path` por defecto es un único archivo por usuario,
   compartido por todos los pipelines jdbc; como este sí usa seguimiento, compartirlo pisaría a otro.
-- `ext_checkdb.sql` (`statement_filepath`), editable por hospital (tipo, esperas, lista de bases):
+- El `statement` de `ext_checkdb.conf`, editable por hospital (tipo, esperas, lista de bases en su bloque CONFIGURACIÓN):
   1. Si `sql_last_value` es 0 (primera corrida) → una fila `BASELINE`, que **no se indexa**: solo siembra
      el valor, no chequea nada.
   2. Si el arranque es posterior al último procesado, pasó `EsperaMin` y las bases están `ONLINE` (o
@@ -102,8 +103,10 @@ Archivos en `elk/`: `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sit
   3. Si no → **0 filas** (siempre devuelve un result set), el valor no avanza y se reintenta en la próxima
      invocación.
 - Índice `ext_checkdb`, `document_id` = `<db>_<sqlserver_start_epoch>` (idempotente ante reintentos).
-- El `.sql` **no puede usar dos puntos** salvo en el marcador de `sql_last_value` (Logstash sustituye
-  marcadores antes de enviar el texto a SQL Server); lo aclara el encabezado del archivo.
+- Reglas para editar el `statement` (Logstash lo procesa antes de mandarlo a SQL Server): comentarios **solo con
+  `/* ... */`** (nunca dos guiones, para no depender de que se conserven los saltos de línea), **sin comillas
+  dobles** (cierran el string) ni la secuencia `${` (Logstash la toma como variable de entorno), y **sin dos
+  puntos** salvo el marcador de `sql_last_value`. Lo aclara el encabezado del `.conf`.
 
 ### 4.3 Camino SQL directo
 
@@ -181,9 +184,9 @@ navegador con la API simulada); lo verdaderamente probado contra SQL Server y Lo
 ## 6. Riesgos y puntos a validar en P03
 
 - **T-SQL sin probar contra SQL Server real** (no hay ninguno en el entorno de desarrollo, ni un
-  validador de T-SQL): el script de `ext_checkdb.sql` y los tests de la GUI que consultan `sys.databases`
+  validador de T-SQL): el `statement` de `ext_checkdb.conf` y los tests de la GUI que consultan `sys.databases`
   pueden tener un error de sintaxis o de compatibilidad de versión. Se prueba a mano en SSMS primero
-  (instrucciones en el encabezado del `.sql`).
+  (instrucciones en el encabezado del `.conf`).
 - **Logstash:** que el marcador de `sql_last_value` se sustituya como numérico dentro del archivo; que el
   Programador de tareas no lance una segunda instancia mientras la primera sigue corriendo; que el driver
   JDBC no corte una sentencia de horas.
@@ -209,13 +212,13 @@ navegador con la API simulada); lo verdaderamente probado contra SQL Server y Lo
 2. Actualizar y reiniciar el **servidor** primero (ingesta de `sql_integrity`, más el tope de 2 MB).
 
 **Camino Elastic (principal)**
-1. En SSMS, probar `elk/ext_checkdb.sql` a mano: reemplazar el marcador de `sql_last_value` por `0`
+1. En SSMS, probar a mano el `statement` de `elk/ext_checkdb.conf` (el texto entre las comillas): reemplazar el marcador de `sql_last_value` por `0`
    (debe devolver la fila `BASELINE`) y por `1` con `@SoloFisico = 1`, `@EsperaMin = 0` y 1–2 bases chicas en
    `@Bases` (debe devolver una fila por base).
-2. Instalar `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sito.bat` en el servidor ELK; crear la
+2. Instalar `ext_checkdb.conf` y `ext_checkdb-all-sito.bat` en el servidor ELK; crear la
    tarea programada (cada 15 min, sin instancias en paralelo). La primera corrida solo siembra el valor.
 3. Simular un reinicio sin reiniciar la VM: detener la tarea, poner un valor **menor** en el archivo
-   `.ext_checkdb_last_run` (por ejemplo `--- 1`) y dejar 1–2 bases chicas y `PHYSICAL_ONLY` en el `.sql`.
+   `.ext_checkdb_last_run` (por ejemplo `--- 1`) y dejar 1–2 bases chicas y `PHYSICAL_ONLY` en el `statement`.
 4. En la GUI del agente: activar "Integridad de bases (CHECKDB)" en la tarjeta de Elastic y probar el botón
    de test. En el próximo ciclo debe viajar `software_monitoring.sql_integrity` y aparecer filas
    `app_name = 'sql_integrity'` en `software_monitoring` del servidor.

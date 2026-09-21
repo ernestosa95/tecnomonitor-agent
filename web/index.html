@@ -923,7 +923,7 @@
                         Lee el resultado del <code>DBCC CHECKDB</code> que Logstash ejecuta cuando SQL Server se
                         reinicia (pipeline <code>ext_checkdb</code>, ver la carpeta <code>elk/</code>) y lo manda
                         una sola vez por reinicio. <b>El tipo de chequeo (completo o liviano) y la lista de bases
-                        se editan en <code>ext_checkdb.sql</code></b> del servidor ELK, no acá. Requiere permiso
+                        se editan en <code>ext_checkdb.conf</code></b> (bloque CONFIGURACIÓN del <code>statement</code>) del servidor ELK, no acá. Requiere permiso
                         de lectura sobre ese índice para el usuario configurado en la tarjeta de Elastic.
                     </p>
                     <div class="row g-3">
