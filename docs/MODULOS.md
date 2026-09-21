@@ -261,3 +261,67 @@ Existe además `test_connection_dicom_index`, un test específico (separado del 
 Elastic) porque un usuario válido para leer los logs de Suitestensa puede no tener permiso
 sobre el índice de autoenrute — ese `403` es difícil de diagnosticar en producción sin un test
 dedicado que lo señale explícitamente.
+
+## Integridad de bases SQL (`DBCC CHECKDB` tras un reinicio)
+
+**Habilitación:** `enabled_elastic` + `elastic.enabled_checkdb` (principal, vía Logstash) **o**
+`enabled_sql` + `sql.enabled_checkdb` (directo, la excepción para hospitales sin Elastic). Si ambos
+están activos gana Elastic — mismo criterio que autoenrute DICOM y los KPIs de RIS. ·
+**Código:** `sql_integrity.py` (despachado desde `ejecutar_ciclo_agente` §5.6). Plan, decisiones y
+riesgos: [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md).
+
+Un `DBCC CHECKDB` de las bases de Extensa es una consulta **costosa** (minutos u horas), por eso solo
+corre ante un **reinicio del servicio SQL Server** — típicamente un corte de energía abrupto — y el
+resultado se manda **una sola vez por reinicio** en `software_monitoring.sql_integrity` (contrato en
+[CONTRATO_AGENTE.md §7ter](./CONTRATO_AGENTE.md)). Nunca corre de forma periódica.
+
+Un reinicio se detecta por el arranque de SQL (`create_date` de `tempdb`, que se recrea en cada
+inicio del servicio y no pide permisos especiales), así que cubre tanto el reinicio de la VM como el
+del propio servicio.
+
+### Vía Elastic (`recolectar_elastic`) — camino principal
+
+Logstash ejecuta el chequeo y el agente solo lee: el pipeline `elk/ext_checkdb.conf` +
+`elk/ext_checkdb.sql` corre cada 15 minutos en su **propio cajón** (`ext_checkdb-all-sito.bat`, con su
+`--path.data`) y decide **del lado SQL** si hubo un reinicio nuevo comparando el arranque de SQL con el
+último procesado (`sqlserver_start_epoch`, columna de seguimiento numérica de Logstash). Así funciona
+esté donde esté Logstash y reintenta solo si SQL tarda en levantar tras un corte. La primera corrida
+solo siembra el valor (fila `BASELINE`, no indexada): **no chequea nada al instalar el pipeline**.
+
+El agente lee `elastic.checkdb_index` (default `ext_checkdb`), toma los documentos del **arranque más
+reciente** y los reenvía una vez (`last_sent_epoch` en su estado). Un índice inexistente es `empty`
+(todavía nunca hubo un reinicio chequeado), no un error. El tipo de chequeo (`full`/`physical_only`) y la
+lista de bases se editan en `ext_checkdb.sql`.
+
+### Directo a SQL (`recolectar_sql`) — la excepción
+
+El agente detecta el reinicio y lanza un **proceso trabajador** desacoplado, porque el chequeo dura más
+que un ciclo y en modo *tarea programada* cada ciclo es un proceso efímero (`--run-once`) que mataría
+cualquier hilo.
+
+| Estado (`.sql_integrity_state_<hospital>`) | Qué pasa |
+|---|---|
+| Sin línea base | La primera vez (instalación o actualización) solo se registra el arranque actual. **No se chequea.** |
+| `pending` | Reinicio detectado. Se espera `checkdb_settle_minutes` y que las bases estén `ONLINE` (hasta `checkdb_max_wait_minutes`). |
+| `running` | Se lanza `TecnoMonitorService.exe --sql-integrity-worker <hospital>`, que chequea base por base. Si muere se relanza (hasta 4 lanzamientos); agotados, se informa lo hecho y las bases faltantes como `ERROR`. Si SQL se reinicia otra vez, se descarta la corrida y se arranca la nueva. |
+| `done` | Resultado listo: se envía en el siguiente reporte y se marca `sent` **solo tras un POST exitoso**. |
+
+Hay un único escritor por archivo, para no necesitar locks: el estado lo escribe solo el agente y los
+resultados (`.sql_integrity_results_<hospital>`) solo el trabajador. Cada resultado se guarda apenas se
+tiene, así que el trabajador retoma desde la primera base que falte. El trabajador escribe en su propio
+log (`sql_integrity_worker.log`, rotado a 1 MB), no en `activity.log`.
+
+La consulta se hace **por base desde Python** (`DBCC CHECKDB ([base]) WITH NO_INFOMSGS, ALL_ERRORMSGS,
+TABLERESULTS [, PHYSICAL_ONLY]`), sin las tres fallas de la consulta manual: sin tablas temporales que
+se filtren entre bases, sin columnas que trunquen mensajes largos, y con cantidad de errores (se toma del
+resumen `CHECKDB found N allocation errors and M consistency errors`) y los primeros mensajes.
+
+### Estados y `collection_meta`
+
+`collection_meta.sql_integrity.status`: `ok` (al día, o resultado nuevo en este reporte) · `pending`
+(esperando que SQL se asiente) · `running` (chequeo en curso, con `done`/`total`) · `empty` (Elastic sin
+resultados todavía) · `error` · `disabled`. El estado por base es `OK` · `ERROR` · `NOT_ONLINE`.
+
+Los botones de test de la GUI (`test_conexion_sql`, `test_conexion_indice`) verifican, respectivamente,
+la conexión + que las bases existan/estén ONLINE + que el usuario sea `sysadmin` o `db_owner`, y que se
+pueda leer el índice.

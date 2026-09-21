@@ -257,11 +257,11 @@ afectar el resto del reporte.
 **Nada de esto tiene un toggle nuevo en la GUI del agente** — se activa automáticamente junto
 con `enabled_mirth` + `mirth_servers[]`, que ya existían.
 
-### 7ter. `sql_integrity` — chequeo de integridad de bases tras un reinicio (planificado, agente 4.5.2)
+### 7ter. `sql_integrity` — chequeo de integridad de bases tras un reinicio (agente >= 4.5.2)
 
-> ⚠️ **Planificado, todavía no implementado en el agente.** Plan completo en
-> [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md). El servidor ya puede ingerirlo
-> (ver el contrato de ingesta, §7.5).
+> Implementado en el agente 4.5.2. Plan completo en
+> [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md). El servidor lo ingiere (ver el
+> contrato de ingesta, §7.5); uno anterior lo descarta sin error.
 
 Clave opcional de `software_monitoring`. Se manda **una sola vez por reinicio** del servicio SQL
 Server (no en cada ciclo), cuando termina el `DBCC CHECKDB` de las bases configuradas, y solo si el
@@ -306,7 +306,8 @@ Mientras el chequeo corre o espera, `collection_meta.sql_integrity.status` es `"
   "mirth":   { "enabled": true, "status": "ok", "total": 2, "errors": 0 },
   "ssl_monitoring":   { "enabled": true, "status": "ok", "total": 5, "errors": 0 },
   "suitestensa_logs": { "enabled": true, "status": "ok", "new_alerts": 3 },
-  "dicom_routing":    { "enabled": true, "status": "ok", "total": 8, "errors": 0 }
+  "dicom_routing":    { "enabled": true, "status": "ok", "total": 8, "errors": 0 },
+  "sql_integrity":    { "enabled": true, "status": "ok", "source": "elastic", "total": 26 }
 }
 ```
 

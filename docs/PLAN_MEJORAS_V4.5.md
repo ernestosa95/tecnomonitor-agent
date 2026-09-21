@@ -461,11 +461,9 @@ No es un compromiso de fechas, es un orden de dependencias e impacto:
 3. **Coordinación con el equipo de servidor** sobre los supuestos de cadencia de Mirth/KPI
    (§1.5) — sigue pendiente, no bloquea nada de lo ya hecho.
 4. ✅ **Bump a `schema_version: "4.5"`** — hecho, confirmado por el usuario que el servidor ya
-   tiene desplegada la validación de token. No se implementó el flag de rollback interno que
-   proponía el punto 5 de §2 (no se pidió) — si algo falla tras desplegar, la vía de reversión
-   es recompilar con `schema_version` vuelto a `"4.3"` en `agent_logic.py`.
-5. **Seguridad de la GUI local** (§3.1, §3.2) — no depende de nada del servidor. ✅ 3.2 hecho;
-   3.1 (bypass de Eel) sigue pendiente.
+   tiene desplegada la validación de token. El flag de rollback interno del punto 5 de §2 **sí se implementó después**
+   (`schema_version_override.txt`, ver §2) — si algo falla tras desplegar, se revierte sin recompilar.
+5. ✅ **Seguridad de la GUI local** (§3.1, §3.2) — hecha (3.1 se resolvió con la migración a pywebview).
 6. **Resto de robustez/performance/seguridad** (§3.3–§3.6, §4, §5) — según capacidad, no son
    bloqueantes para el corte de versión pero conviene no acumularlos indefinidamente.
 7. **Higiene de versión** (§6) — antes de compilar el primer build oficial de v4.5, para no

@@ -162,6 +162,9 @@ Todo el estado persistente vive en `%PROGRAMDATA%\TecnoMonitor` (`security.get_a
 | `.sql_checkpoint` | Marca de tiempo hasta donde ya se extrajo del SQL de negocio | Servicio, tras confirmar el envío |
 | `.elastic_checkpoint` | Marca de tiempo del último log de Suitestensa procesado | Servicio, tras confirmar el envío |
 | `unknowns_lab.json` | Patrones de error no reconocidos por `rules.json`, agrupados localmente | Servicio |
+| `.sql_integrity_state_<hospital>` | Estado del chequeo de integridad de bases SQL (línea base, corrida, enviado) — v4.5.2 | Servicio (un solo escritor) |
+| `.sql_integrity_results_<hospital>` | Resultado por base del chequeo directo a SQL — v4.5.2 | Proceso trabajador `--sql-integrity-worker` (un solo escritor) |
+| `sql_integrity_worker.log` | Log del proceso trabajador (rotado a 1 MB) — v4.5.2 | Proceso trabajador |
 
 `rules.json` **no** vive en `ProgramData`: se resuelve relativo al ejecutable
 (`os.path.dirname(os.path.abspath(__file__))`), y PyInstaller lo empaqueta junto al `.exe`

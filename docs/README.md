@@ -1,6 +1,6 @@
 # Documentación — TecnoMonitor Agent
 
-Índice de documentación técnica del agente de monitoreo TecnoMonitor (v4.5.0).
+Índice de documentación técnica del agente de monitoreo TecnoMonitor (v4.5.2).
 Esta carpeta describe el sistema **tal como está implementado hoy** en el repositorio;
 no incluye cambios ni propuestas de código, solo documentación de referencia.
 
@@ -38,6 +38,7 @@ configurarlo y controlar el servicio sin editar archivos a mano.
 ```
 agent_logic.py        Toda la lógica de recolección (Proxmox, VMware, iDRAC, WMI, SQL, SSL, Elastic) y el ciclo principal
 mirth_collector.py    Recolección específica de Mirth Connect (API REST)
+sql_integrity.py      Chequeo de integridad de bases SQL (DBCC CHECKDB) tras un reinicio, por Elastic o SQL directo (v4.5.2)
 security.py           Cifrado simétrico (Fernet) de credenciales guardadas en disco
 headless_service.py   Entry point del servicio de Windows (bucle infinito, logging, mutex anti-duplicados)
 service_control.py    Wrapper sobre el SCM de Windows (start/stop/status) usado por la GUI

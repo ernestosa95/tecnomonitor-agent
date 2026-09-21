@@ -123,6 +123,26 @@ grande. La GUI ya advierte esto en el diálogo de confirmación.
 Ambos checkpoints se escriben de forma atómica (`.tmp` + `os.replace`) y solo después de que el
 POST al servidor central confirme éxito — ver [ENVELOPE_API.md](./ENVELOPE_API.md).
 
+### Integridad de bases SQL (v4.5.2)
+
+Solo aplica si el módulo está activo (ver [MODULOS.md](./MODULOS.md#integridad-de-bases-sql-dbcc-checkdb-tras-un-reinicio)).
+Archivos por hospital, todos en `%PROGRAMDATA%\TecnoMonitor`:
+
+| Archivo | Qué es | Cómo resetearlo |
+|---|---|---|
+| `.sql_integrity_state_<hospital_id>` | Estado del agente: último arranque de SQL visto (línea base), corrida en curso y si ya se envió (`last_sent_epoch` en el camino Elastic) | Borrarlo con el servicio detenido: la próxima vez se registra una **nueva línea base** y no chequea nada |
+| `.sql_integrity_results_<hospital_id>` | Resultado por base del trabajador (camino SQL directo) | Se reemplaza solo en la próxima corrida |
+| `sql_integrity_worker.log` | Log del proceso trabajador (rotado a 1 MB) | — |
+
+**Para probar sin reiniciar la VM** (camino SQL directo): con el servicio detenido, editar
+`.sql_integrity_state_<hospital_id>` y cambiar `baseline_boot` a una fecha anterior al arranque real de
+SQL (por ejemplo `"2000-01-01T00:00:00"`); en el próximo ciclo se detecta como un reinicio nuevo. Conviene
+probar con 1 o 2 bases chicas en `checkdb_databases` y el tipo liviano (`physical_only`).
+
+Un chequeo en curso se ve en `collection_meta.sql_integrity` (`status: "running"`, con `done`/`total`) y
+en `sql_integrity_worker.log`. Si el trabajador está corriendo, `TecnoMonitorService.exe --sql-integrity-worker`
+aparece como un proceso más en el Administrador de tareas.
+
 ## Diagnóstico de conectividad (`--selftest`)
 
 ```

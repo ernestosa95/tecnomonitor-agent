@@ -7,6 +7,24 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
+## v4.5.2
+
+- **Nuevo módulo: chequeo de integridad de bases SQL Server (`DBCC CHECKDB`) tras un reinicio**
+  (`sql_integrity.py`). Solo corre cuando el servicio SQL se reinicia (típicamente un corte de
+  energía) y manda el resultado una vez por reinicio en `software_monitoring.sql_integrity`. Dos caminos
+  independientes, Elastic principal (`elk/ext_checkdb.*`, lee el índice `ext_checkdb`) y SQL directo la
+  excepción (proceso trabajador desacoplado, `--sql-integrity-worker`); si ambos están activos gana
+  Elastic. La primera vez solo registra una línea base (no chequea al instalar/actualizar). Tipo de
+  chequeo completo o `PHYSICAL_ONLY` configurable, y las 26 bases de Extensa por defecto, editables. GUI: una
+  tarjeta en SQL y otra en Elastic. Ver [PLAN_CHECKDB_POST_REINICIO.md](./PLAN_CHECKDB_POST_REINICIO.md).
+- Contrato: clave nueva `software_monitoring.sql_integrity` y `collection_meta.sql_integrity`
+  ([CONTRATO_AGENTE.md §7ter](./CONTRATO_AGENTE.md)). El servidor la ingiere desde la versión de
+  `2026-09-21`; un servidor anterior la descarta sin error.
+- `schema_version` **no cambia** (sigue en `"4.5"`): por eso esto es 4.5.2 y no 4.6 — un `"4.6"` que el
+  servidor no reconoce se trataría como formato legacy V2.
+- Tests: `tests/test_sql_integrity.py` (39 casos: máquina de estados, trabajador, lector de Elastic,
+  integración con el ciclo y botones de test).
+
 ## v4.5.1
 
 - **`mirth_collector.py`: topología de canales para el mapa de integraciones.** Agrega una

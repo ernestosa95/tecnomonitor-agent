@@ -10,7 +10,7 @@
 - Conectividad saliente HTTPS hacia `central_url` (servidor central) y hacia cada integración
   habilitada (Proxmox/vCenter, iDRAC, SQL Server, Mirth, ElasticSearch, URLs SSL a monitorear).
 
-## Qué instala `TecnoMonitor_v4.5.0_Setup.exe`
+## Qué instala `TecnoMonitor_v<versión>_Setup.exe` (el nombre sale de `/VERSION`)
 
 El instalador está definido en [`TecnoMonitor.iss`](../TecnoMonitor.iss) (Inno Setup). Pasos,
 en orden:

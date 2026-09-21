@@ -1,7 +1,9 @@
 # Plan — Chequeo de integridad de bases SQL Server tras un reinicio (`sql_integrity`)
 
-**Estado — 2026-09-21: en ejecución.** Decisiones tomadas; F1 (contrato + ingesta del servidor) en
-curso. Se entrega en el agente **4.5.2** (el instalador 4.5.1 ya está en P03 y no cambia).
+**Estado — 2026-09-21: implementado (F1–F4). Falta la validación en P03 y el build (F5).**
+Se entrega en el agente **4.5.2** (el instalador 4.5.1 ya está en P03 y no cambia). Lo verificado hasta
+acá es con simulación (125 tests del agente, sin un SQL Server ni un Logstash reales); el pipeline
+de Logstash y sus consultas T-SQL **no se probaron contra un SQL Server real**: ver §7.
 
 ## 1. Objetivo y alcance
 
@@ -26,7 +28,7 @@ un reinicio**, nunca de forma periódica.
 | 3 | Credencial | La misma (`sql.user`). No se agrega una credencial dedicada. |
 | 4 | Camino principal | **Elastic (Logstash)**. El SQL directo es la **excepción**, para hospitales sin Elastic. Si ambos están activos, gana Elastic (mismo criterio que autoenrute DICOM y KPIs de RIS). |
 | 5 | Bases | Las 26 de la consulta manual por defecto, **editables** (pueden existir más). Las que no existan en un hospital se ignoran. |
-| 6 | Qué cuenta como reinicio | El **arranque del servicio SQL** (`sqlserver_start_time`), lo que cubre tanto el reinicio de la VM como el del servicio. Pensado para cortes de energía. |
+| 6 | Qué cuenta como reinicio | El **arranque del servicio SQL** (`create_date` de `tempdb`), lo que cubre tanto el reinicio de la VM como el del servicio. Pensado para cortes de energía. |
 | 7 | Versión | **4.5.2**. No 4.6: `schema_version` sale de `major.minor` de `VERSION`, y el servidor trata un `"4.6"` desconocido como formato legacy V2, corrompiendo los datos en silencio (ver [PLAN_MEJORAS_V4.5.md §2](./PLAN_MEJORAS_V4.5.md)). |
 
 ## 3. Hallazgos que condicionan el diseño
@@ -35,8 +37,9 @@ un reinicio**, nunca de forma periódica.
    síncrono. En modo *tarea programada* cada ciclo es un proceso nuevo (`--run-once`) que termina y
    mata cualquier hilo. El camino SQL directo necesita un **proceso trabajador separado** con
    estado en disco (mismo mecanismo que los checkpoints de KPIs).
-2. **Detección de reinicio.** Se compara `sqlserver_start_time` (`sys.dm_os_sys_info`; alternativa
-   sin permisos especiales: `create_date` de `tempdb`) con el último valor visto.
+2. **Detección de reinicio.** Se compara el arranque de SQL con el último valor visto. Se toma de la
+   `create_date` de `tempdb` (se recrea en cada inicio del servicio y no pide permisos especiales, a
+   diferencia de `sys.dm_os_sys_info`).
    - **Primera vez** (instalación o actualización del agente): solo se registra la **línea base**;
      no se dispara ningún chequeo, para no lanzar una carga enorme al actualizar.
    - Tras el arranque se espera un tiempo (`settle_minutes`) y se verifica que las bases estén
@@ -80,17 +83,27 @@ un reinicio**, nunca de forma periódica.
 
 ### 4.2 Pipeline de Logstash (camino Elastic)
 
-- `elk/ext_checkdb.conf` + `elk/ext_checkdb.sql` (`statement_filepath`), sin `schedule`, como los
-  demás: un ciclo por invocación. Se invoca desde `elk/ext_checkdb-all-sito.bat` (cajón propio).
-- `use_column_value => true` con `tracking_column => "sqlserver_start_time"`. El `.sql`:
-  1. Lee `sqlserver_start_time`.
-  2. Si `:sql_last_value` es el valor inicial → devuelve una única fila `BASELINE` (siembra el valor,
-     no corre CHECKDB).
-  3. Si el arranque es posterior al último procesado **y** pasó `settle_minutes` → corre el CHECKDB
-     base por base y devuelve una fila por base.
-  4. Si no → no devuelve filas (el valor no avanza, y se reintenta en la próxima invocación).
-- Índice `ext_checkdb`, `document_id` = `<db>_<sqlserver_start_time>` (idempotente ante reintentos).
-  El `output` descarta las filas `BASELINE`.
+Archivos en `elk/`: `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sito.bat`.
+
+- **Sin `schedule =>`**, como los demás: un ciclo por invocación. Se invoca desde su **propio cajón**
+  (`ext_checkdb-all-sito.bat`, tarea programada cada 15 min con "no iniciar una instancia nueva" si ya
+  se está ejecutando) y con su **propio `--path.data`**, porque dos Logstash simultáneos con el mismo
+  data dir se bloquean entre sí y este cajón puede encimarse con los de 5 minutos.
+- **Seguimiento numérico** (`use_column_value`, `tracking_column => "sqlserver_start_epoch"`,
+  `tracking_column_type => "numeric"`, `last_run_metadata_path` **propio**): el arranque de SQL en
+  segundos desde 1970. Es numérico y sale del propio SQL, así que no depende de zonas horarias ni de
+  en qué VM corra Logstash. El `last_run_metadata_path` por defecto es un único archivo por usuario,
+  compartido por todos los pipelines jdbc; como este sí usa seguimiento, compartirlo pisaría a otro.
+- `ext_checkdb.sql` (`statement_filepath`), editable por hospital (tipo, esperas, lista de bases):
+  1. Si `sql_last_value` es 0 (primera corrida) → una fila `BASELINE`, que **no se indexa**: solo siembra
+     el valor, no chequea nada.
+  2. Si el arranque es posterior al último procesado, pasó `EsperaMin` y las bases están `ONLINE` (o
+     venció `EsperaMaxMin`) → corre el CHECKDB base por base (cursor T-SQL) y devuelve una fila por base.
+  3. Si no → **0 filas** (siempre devuelve un result set), el valor no avanza y se reintenta en la próxima
+     invocación.
+- Índice `ext_checkdb`, `document_id` = `<db>_<sqlserver_start_epoch>` (idempotente ante reintentos).
+- El `.sql` **no puede usar dos puntos** salvo en el marcador de `sql_last_value` (Logstash sustituye
+  marcadores antes de enviar el texto a SQL Server); lo aclara el encabezado del archivo.
 
 ### 4.3 Camino SQL directo
 
@@ -156,22 +169,60 @@ alertas se resuelven después; los otros consumidores de `software_monitoring` f
 
 | Fase | Qué | Estado |
 |---|---|---|
-| **F1** | Contrato (agente y servidor) + **ingesta en el servidor** + pruebas. | En curso |
-| **F2** | **Camino Elastic (principal):** `ext_checkdb.conf/.sql`, `.bat` propio, lector del agente (`collection_meta`, envío una vez por reinicio), botón de test. | Pendiente |
-| **F3** | **Camino SQL directo (excepción):** `sql_integrity.py`, estado, detector, trabajador, tests con `pyodbc` simulado. | Pendiente |
-| **F4** | **GUI y docs:** toggles en las tarjetas SQL y Elastic, tipo de chequeo, lista de bases, test que verifica permisos; `CONFIGURACION`, `MODULOS`, `CHANGELOG`. | Pendiente |
-| **F5** | **Validación en P03 y build 4.5.2.** Simular un reinicio sin reiniciar la VM (borrando la línea base), con 1 o 2 bases chicas y `PHYSICAL_ONLY`; después un reinicio real planificado. Ajustar `VERSION` a 4.5.2 y el test que fija la versión. | Pendiente |
+| **F1** | Contrato (agente y servidor) + **ingesta en el servidor** + pruebas. | ✅ Hecha |
+| **F2** | **Camino Elastic (principal):** `elk/ext_checkdb.*`, lector del agente, `collection_meta`, envío una vez por reinicio, botón de test. | ✅ Hecha (Logstash sin probar contra un entorno real) |
+| **F3** | **Camino SQL directo (excepción):** `sql_integrity.py`, estado, detector, trabajador, tests con `pyodbc` simulado. | ✅ Hecha (sin probar contra un SQL Server real) |
+| **F4** | **GUI y docs:** tarjetas en SQL y Elastic, tipo de chequeo, lista de bases, tests de permisos y de índice; `CONFIGURACION`, `MODULOS`, `OPERACION`, `CHANGELOG`. | ✅ Hecha |
+| **F5** | **Validación en P03 y build 4.5.2.** `VERSION` ya está en 4.5.2. Falta compilar el instalador en Windows y validar (ver §7). | ⏳ Pendiente |
 
-No hay un SQL Server real en el entorno de desarrollo: los tests son con simulación, y lo
-verdaderamente probado sale de F5.
+Los tests son con simulación (125 en total, 39 propios de este módulo, más una prueba de la GUI en un
+navegador con la API simulada); lo verdaderamente probado contra SQL Server y Logstash sale de F5.
 
 ## 6. Riesgos y puntos a validar en P03
 
-- **Logstash:** formato y zona horaria de `:sql_last_value` frente a `sqlserver_start_time`
-  (`jdbc_default_timezone`); que el Programador de tareas no lance una segunda instancia mientras la
-  primera sigue corriendo; que el driver JDBC no corte una sentencia de horas.
+- **T-SQL sin probar contra SQL Server real** (no hay ninguno en el entorno de desarrollo, ni un
+  validador de T-SQL): el script de `ext_checkdb.sql` y los tests de la GUI que consultan `sys.databases`
+  pueden tener un error de sintaxis o de compatibilidad de versión. Se prueba a mano en SSMS primero
+  (instrucciones en el encabezado del `.sql`).
+- **Logstash:** que el marcador de `sql_last_value` se sustituya como numérico dentro del archivo; que el
+  Programador de tareas no lance una segunda instancia mientras la primera sigue corriendo; que el driver
+  JDBC no corte una sentencia de horas.
+- **Pérdida de un resultado si Elastic está caído justo al terminar un CHECKDB largo:** el seguimiento
+  avanza al terminar la consulta, antes de que el output confirme la escritura. Mitigación posible: cola
+  persistente (`queue.type: persisted`) en el logstash.yml de este pipeline.
 - **Impacto en producción:** el CHECKDB completo compite por I/O y CPU con el RIS/PACS. Usar
   `PHYSICAL_ONLY` si se ve afectación; evaluar `MAXDOP` si hace falta acotarlo.
-- **SQL lento tras un corte:** la recuperación de bases puede tardar; por eso la espera con
-  reintento, y `NOT_ONLINE` como resultado válido si no se recuperan a tiempo.
-- **Credencial ampliada:** verificar que la activación en un hospital no exponga más de lo debido.
+- **Espacio libre:** el CHECKDB crea un snapshot interno en el mismo volumen y usa `tempdb`; con poco espacio,
+  sobre todo tras un corte, puede fallar (sale como `ERROR` de esa base con el mensaje).
+- **SQL lento tras un corte:** la recuperación de bases puede tardar; por eso la espera con reintento y
+  `NOT_ONLINE` como resultado válido si no se recuperan a tiempo.
+- **Credencial ampliada:** `sysadmin`/`db_owner` para `DBCC CHECKDB`; verificar que la activación en un
+  hospital no exponga más de lo debido.
+- **Trabajador desacoplado (SQL directo):** si el servicio se detiene mientras el trabajador corre, el
+  trabajador puede seguir vivo y el agente lo detecta por PID + hora de creación; a validar en Windows real.
+
+## 7. Guía de validación en P03 (F5)
+
+**Antes de tocar el hospital**
+1. Compilar el instalador 4.5.2 en Windows (`build.bat`) y actualizar encima de 4.5.1 (la
+   configuración se conserva). Con el módulo apagado no cambia nada respecto de 4.5.1.
+2. Actualizar y reiniciar el **servidor** primero (ingesta de `sql_integrity`, más el tope de 2 MB).
+
+**Camino Elastic (principal)**
+1. En SSMS, probar `elk/ext_checkdb.sql` a mano: reemplazar el marcador de `sql_last_value` por `0`
+   (debe devolver la fila `BASELINE`) y por `1` con `@SoloFisico = 1`, `@EsperaMin = 0` y 1–2 bases chicas en
+   `@Bases` (debe devolver una fila por base).
+2. Instalar `ext_checkdb.conf`, `ext_checkdb.sql` y `ext_checkdb-all-sito.bat` en el servidor ELK; crear la
+   tarea programada (cada 15 min, sin instancias en paralelo). La primera corrida solo siembra el valor.
+3. Simular un reinicio sin reiniciar la VM: detener la tarea, poner un valor **menor** en el archivo
+   `.ext_checkdb_last_run` (por ejemplo `--- 1`) y dejar 1–2 bases chicas y `PHYSICAL_ONLY` en el `.sql`.
+4. En la GUI del agente: activar "Integridad de bases (CHECKDB)" en la tarjeta de Elastic y probar el botón
+   de test. En el próximo ciclo debe viajar `software_monitoring.sql_integrity` y aparecer filas
+   `app_name = 'sql_integrity'` en `software_monitoring` del servidor.
+5. Después, con las 26 bases y el tipo elegido, un **reinicio real planificado** de SQL Server.
+
+**Camino SQL directo (solo si el hospital no tiene Elastic)**: ver el procedimiento de prueba de
+[OPERACION.md](./OPERACION.md#integridad-de-bases-sql-v452) (editar `baseline_boot` para simular el reinicio).
+
+**Reversa:** desactivar el módulo en la GUI (o instalar 4.5.1) no deja nada colgado; el archivo de estado se
+puede borrar y el pipeline de Logstash se quita desactivando su tarea.

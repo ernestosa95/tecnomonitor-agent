@@ -72,6 +72,14 @@ Ver [MODULOS.md](./MODULOS.md#proxmox--vmware) para qué se recolecta según el 
 | `sql.historical_start_date` | string `YYYY-MM-DD` | — | Fecha desde la que arrancar el backfill histórico si no hay checkpoint previo. Si falta o es inválida, se usa el inicio del día actual |
 | `sql.enabled_dicom_routing` | bool | `false` | **v4.6** — habilita el autoenrute DICOM directo a SQL Server (ver [§ ElasticSearch](#elasticsearch-logs--autoenrute-dicom--kpis-de-ris--enabled_elastic--elastic) más abajo para la variante vía Elastic y la prioridad entre ambas). A diferencia del resto de esta tarjeta, corre en **cada ciclo** del intervalo global, no en el bloque de KPIs de negocio — no tiene checkpoint ni ventana, es una foto del estado actual de las reglas |
 
+| `sql.enabled_checkdb` | bool | `false` | **v4.5.2** — habilita el chequeo de integridad de bases (`DBCC CHECKDB`) tras un reinicio de SQL Server, camino **directo** (la excepción, para hospitales sin Elastic). Si `elastic.enabled_checkdb` también está activo, gana Elastic. Ver [MODULOS.md](./MODULOS.md#integridad-de-bases-sql-dbcc-checkdb-tras-un-reinicio) |
+| `sql.checkdb_type` | string | `"full"` | `"full"` (completo, como la consulta manual) o `"physical_only"` (liviano, sin chequeos lógicos) |
+| `sql.checkdb_databases` | lista de strings | las 26 de Extensa | Bases a chequear. Vacía o ausente = las 26 por defecto; se puede editar/agregar. Las que no existan en el servidor se ignoran |
+| `sql.checkdb_settle_minutes` | int | `10` | Minutos de espera tras el arranque de SQL antes de chequear (deja terminar la recuperación de las bases) |
+| `sql.checkdb_max_wait_minutes` | int | `60` | Solo por archivo (no está en la GUI). Hasta cuándo esperar que todas las bases estén `ONLINE`; vencido, se chequea igual y las que no lo estén salen `NOT_ONLINE` |
+
+El usuario `sql.user` necesita ser **`sysadmin`** o **`db_owner`** de cada base para `DBCC CHECKDB` (más de lo que piden los KPIs). El botón de test de la GUI lo verifica.
+
 Detalle de la extracción (checkpoint, backfill, bloques) en [MODULOS.md](./MODULOS.md#sql-server-kpis-de-negocio).
 
 ## Equipos Windows/Linux — `enabled_vms` + `vms[]`
@@ -123,6 +131,8 @@ cantidad de file descriptors abiertos del proceso, no el mismo concepto que en W
 | `elastic.enabled_dicom_routing` | bool | `false` | Habilita el sub-módulo de autoenrute DICOM vía Elastic (ver más abajo). Si `sql.enabled_dicom_routing` **también** está activo, este camino tiene prioridad (mismo criterio que `enabled_ris_metrics` sobre `enabled_sql`) |
 | `elastic.dicom_index` | string | `"ext_dicom_queues"` | Índice donde Logstash publica el estado de las colas de autoenrute |
 | `elastic.dicom_max_age_minutes` | int | `15` | Antigüedad máxima aceptada de un documento del índice de autoenrute antes de considerarlo obsoleto |
+| `elastic.enabled_checkdb` | bool | `false` | **v4.5.2** — habilita la lectura del índice de integridad de bases (`DBCC CHECKDB` tras un reinicio de SQL Server) que publica el pipeline `elk/ext_checkdb.conf`. Es el camino **principal**: si `sql.enabled_checkdb` también está activo, este gana |
+| `elastic.checkdb_index` | string | `"ext_checkdb"` | Índice donde el pipeline publica un documento por base y por reinicio. El tipo de chequeo y la lista de bases de este camino se editan en `elk/ext_checkdb.sql`, no acá |
 | `elastic.enabled_ris_metrics` | bool | `false` | **v4.5** — habilita la extracción de KPIs de RIS/PACS/usuarios vía Elastic en vez de SQL directo (ver [ELK_RIS_METRICS.md](./ELK_RIS_METRICS.md)). Convive con `enabled_sql`: si está en `true` y `elastic.host` está configurado, tiene prioridad sobre el módulo SQL directo para ese hospital |
 | `elastic.ris_executions_per_day` | int | `3` | Igual semántica que `sql.executions_per_day`, pero para el camino vía Elastic — define el tamaño de bloque (`24 / ris_executions_per_day` horas) que el agente reconstruye sumando buckets horarios |
 | `elastic.ris_historical_start_date` | string `YYYY-MM-DD` | — | Igual semántica que `sql.historical_start_date`, para el backfill del camino vía Elastic |
