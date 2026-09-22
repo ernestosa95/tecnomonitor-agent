@@ -24,6 +24,11 @@ como está.
   servidor no reconoce se trataría como formato legacy V2.
 - Tests: `tests/test_sql_integrity.py` (39 casos: máquina de estados, trabajador, lector de Elastic,
   integración con el ciclo y botones de test).
+- **Validado en P03 (2026-09-22):** las 26 bases quedaron `OK` de punta a punta tras un reinicio real
+  de SQL Server. `elk/ext_checkdb.conf` traía `jdbc_connection_string` apuntando a `SRVDB-ESTENSA`
+  (placeholder de la plantilla, nunca resolvía en el DNS de P03) en vez de `localhost` (la
+  convención real del sitio, Logstash y SQL Server en la misma VM); corregido. Detalle completo en
+  [PLAN_CHECKDB_POST_REINICIO.md §8](./PLAN_CHECKDB_POST_REINICIO.md).
 
 ## v4.5.1
 

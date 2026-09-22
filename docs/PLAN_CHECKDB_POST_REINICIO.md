@@ -1,6 +1,8 @@
 # Plan — Chequeo de integridad de bases SQL Server tras un reinicio (`sql_integrity`)
 
-**Estado — 2026-09-21: implementado (F1–F4). Falta la validación en P03 y el build (F5).**
+**Estado — 2026-09-22: implementado y validado de punta a punta en P03 (F1–F5 hechas).** Visualización
+(tarjeta en la pestaña Software) y alerta por `ERROR` agregadas en el server el mismo día — ver
+[10 §7.5](../../tecnomonitor-server/docs/10-contrato-ingesta-agente.md) del repo del server.
 Se entrega en el agente **4.5.2** (el instalador 4.5.1 ya está en P03 y no cambia). Lo verificado hasta
 acá es con simulación (125 tests del agente, sin un SQL Server ni un Logstash reales); el pipeline
 de Logstash y sus consultas T-SQL **no se probaron contra un SQL Server real**: ver §7.
@@ -176,7 +178,7 @@ alertas se resuelven después; los otros consumidores de `software_monitoring` f
 | **F2** | **Camino Elastic (principal):** `elk/ext_checkdb.*`, lector del agente, `collection_meta`, envío una vez por reinicio, botón de test. | ✅ Hecha (Logstash sin probar contra un entorno real) |
 | **F3** | **Camino SQL directo (excepción):** `sql_integrity.py`, estado, detector, trabajador, tests con `pyodbc` simulado. | ✅ Hecha (sin probar contra un SQL Server real) |
 | **F4** | **GUI y docs:** tarjetas en SQL y Elastic, tipo de chequeo, lista de bases, tests de permisos y de índice; `CONFIGURACION`, `MODULOS`, `OPERACION`, `CHANGELOG`. | ✅ Hecha |
-| **F5** | **Validación en P03 y build 4.5.2.** `VERSION` ya está en 4.5.2. Falta compilar el instalador en Windows y validar (ver §7). | ⏳ Pendiente |
+| **F5** | **Validación en P03 y build 4.5.2.** `VERSION` en 4.5.2 (ver §7). | ✅ Hecha (2026-09-22) |
 
 Los tests son con simulación (125 en total, 39 propios de este módulo, más una prueba de la GUI en un
 navegador con la API simulada); lo verdaderamente probado contra SQL Server y Logstash sale de F5.
@@ -229,3 +231,31 @@ navegador con la API simulada); lo verdaderamente probado contra SQL Server y Lo
 
 **Reversa:** desactivar el módulo en la GUI (o instalar 4.5.1) no deja nada colgado; el archivo de estado se
 puede borrar y el pipeline de Logstash se quita desactivando su tarea.
+
+## 8. Resultado de la validación en P03 (2026-09-22)
+
+Circuito completo confirmado: SQL Server → Logstash (`ext_checkdb.conf`) → índice `ext_checkdb` en
+Elastic → agente (`recolectar_elastic`) → server (`_ingerir_sql_integrity`) → tabla
+`software_monitoring` → tarjeta en la pestaña Software → alerta. Las 26 bases quedaron `OK` tras un
+reinicio real de SQL Server.
+
+El T-SQL de `ext_checkdb.conf` funcionó sin ajustes. Los problemas reales encontrados fueron de
+infraestructura, no del pipeline en sí:
+
+1. **`ext_checkdb.conf` desplegado en P03 traía `jdbc_connection_string =>
+   "jdbc:sqlserver://SRVDB-ESTENSA;..."`**, copiado tal cual de la plantilla del repo.
+   `SRVDB-ESTENSA` nunca fue un nombre DNS real en este hospital (el DNS del dominio
+   `ARP03DC0V` daba "Non-existent domain") — la convención real de P03 (Logstash y SQL Server en
+   la misma VM) es `localhost`, como ya usaba el `ext_ris_metrics.conf` real que sí funcionaba.
+   Con el host roto, Logstash reintentaba conectar sin salir nunca, y como la Tarea Programada
+   tiene "No iniciar instancia nueva" (a propósito, por si el CHECKDB real tarda horas), quedó
+   bloqueada ~11 horas sin poder correr. **Corregido** en `elk/ext_checkdb.conf` del repo y en el
+   desplegado.
+2. El server de producción estaba desactualizado (`_ingerir_sql_integrity`, commit `fe7ab0d`,
+   quedó por encima del commit al que se había sincronizado producción el 2026-09-21) — requirió
+   `git pull` + reinicio antes de activar el módulo en el agente.
+
+**Pendiente, no relacionado con este módulo:** al revisar el hospital de pruebas también apareció el
+módulo de KPI/RIS (`extraer_metricas_ris_elastic`) con el checkpoint atascado ~12h en "bloque
+futuro" — causa distinta, sin diagnosticar la raíz; se parchó reseteando el intervalo a 1h dado que
+P03 es de pruebas. Si vuelve a pasar en un hospital real, hay que investigarlo de nuevo.
