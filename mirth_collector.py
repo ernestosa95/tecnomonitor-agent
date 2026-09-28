@@ -1,5 +1,6 @@
 import re
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import requests
@@ -17,6 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ---------------------------------------------------------------------------
 CACHE_TOPO_TTL_SEG = 3600
 _topo_cache = {}  # alias -> {"fetched_at": epoch, "ids": set(channel_id), "canales": [...]}
+_avisado_xml = set()  # alias a los que ya se les logueó que la topología salió por XML
 
 # Nunca se manda el jdbc/URL de un conector tal cual: puede traer
 # credenciales embebidas (Database Reader/Writer, HTTP Sender con auth).
@@ -152,7 +154,9 @@ def _distilar_canal(ch):
     for i, conn in enumerate(_lista_destinos(ch)):
         try:
             d = _endpoint_de_conector(conn)
-            d["metadata_id"] = conn.get("metaDataId", i + 1)
+            # En JSON llega numérico; en XML, como texto.
+            md = _safe_int(conn.get("metaDataId"))
+            d["metadata_id"] = md if md is not None else i + 1
             d["name"] = (conn.get("name") or f"Destino {i + 1}")[:120]
             d["enabled"] = _as_bool(conn.get("enabled"), default=True)
             destinos.append(d)
@@ -166,6 +170,49 @@ def _distilar_canal(ch):
         "source": origen,
         "destinations": destinos,
     }
+
+
+def _xml_a_dict(elem):
+    """
+    Convierte el XML de Mirth a la misma forma que su JSON: cada hijo es una
+    clave, los hijos repetidos una lista, las hojas su texto. Los atributos
+    (`version`, `class`) se descartan: la topología no los usa.
+    """
+    hijos = list(elem)
+    if not hijos:
+        return (elem.text or "").strip()
+    agrupado = {}
+    for h in hijos:
+        agrupado.setdefault(h.tag, []).append(_xml_a_dict(h))
+    return {k: v[0] if len(v) == 1 else v for k, v in agrupado.items()}
+
+
+def _descargar_canales(s, url, alias, log_func=None):
+    """
+    GET /api/channels en JSON y, si falla, en XML. Mirth 4.5.2 devuelve 500
+    en JSON cuando no puede convertir algún canal (confirmado en H05,
+    2026-09-28: JSON 500, XML 200 con la misma lista); el XML es su formato
+    nativo y no pasa por esa conversión.
+    """
+    try:
+        r = s.get(f"{url}/api/channels", verify=False, timeout=30)
+        r.raise_for_status()
+        lista = r.json().get('list', {}).get('channel', [])
+    except Exception as e_json:
+        try:
+            r = s.get(f"{url}/api/channels", headers={'Accept': 'application/xml'}, verify=False, timeout=30)
+            r.raise_for_status()
+            raiz = _xml_a_dict(ET.fromstring(r.content))
+            lista = raiz.get('channel', []) if isinstance(raiz, dict) else []
+        except Exception as e_xml:
+            raise RuntimeError(f"JSON: {str(e_json)[:80]} | XML: {str(e_xml)[:80]}") from e_xml
+        if log_func and alias not in _avisado_xml:
+            _avisado_xml.add(alias)
+            log_func(f"ℹ️ Topología Mirth ({alias}): /api/channels falla en JSON ({str(e_json)[:60]}); se usa XML.")
+
+    if isinstance(lista, dict):
+        lista = [lista]
+    return lista
 
 
 def _recolectar_topologia(s, url, alias, ids_actuales, log_func=None):
@@ -183,12 +230,7 @@ def _recolectar_topologia(s, url, alias, ids_actuales, log_func=None):
         return cache["canales"]
 
     try:
-        r = s.get(f"{url}/api/channels", verify=False, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        lista = data.get('list', {}).get('channel', [])
-        if isinstance(lista, dict):
-            lista = [lista]
+        lista = _descargar_canales(s, url, alias, log_func)
 
         canales = []
         for ch in lista:
@@ -208,7 +250,7 @@ def _recolectar_topologia(s, url, alias, ids_actuales, log_func=None):
 
     except Exception as e:
         if log_func:
-            log_func(f"⚠️ Topología Mirth ({alias}) no disponible este ciclo: {str(e)[:120]}")
+            log_func(f"⚠️ Topología Mirth ({alias}) no disponible este ciclo: {str(e)[:200]}")
         return cache["canales"] if cache else None
 
 

@@ -18,9 +18,10 @@ import mirth_collector
 # ---------------------------------------------------------------------------
 
 class _FakeResponse:
-    def __init__(self, json_data=None, raise_exc=None):
+    def __init__(self, json_data=None, raise_exc=None, content=b""):
         self._json = json_data if json_data is not None else {}
         self._raise_exc = raise_exc
+        self.content = content
 
     def raise_for_status(self):
         if self._raise_exc:
@@ -32,7 +33,8 @@ class _FakeResponse:
 
 class _FakeSession:
     def __init__(self, statistics=None, statuses=None, channels=None,
-                 login_falla=False, logout_falla=False, channels_falla=False):
+                 login_falla=False, logout_falla=False, channels_falla=False,
+                 channels_json_500=False, channels_xml=None):
         self.headers = {}
         self._statistics = statistics if statistics is not None else {}
         self._statuses = statuses if statuses is not None else {}
@@ -40,6 +42,9 @@ class _FakeSession:
         self._login_falla = login_falla
         self._logout_falla = logout_falla
         self._channels_falla = channels_falla
+        # Mirth 4.5.2 de H05: /api/channels da 500 en JSON y 200 en XML.
+        self._channels_json_500 = channels_json_500
+        self._channels_xml = channels_xml
         self.logout_calls = 0
         self.channels_calls = 0
 
@@ -64,6 +69,11 @@ class _FakeSession:
             self.channels_calls += 1
             if self._channels_falla:
                 raise requests.exceptions.ConnectionError("channels roto")
+            if (kwargs.get("headers") or {}).get("Accept") == "application/xml":
+                return _FakeResponse(content=(self._channels_xml or "<list/>").encode("utf-8"))
+            if self._channels_json_500:
+                return _FakeResponse(raise_exc=requests.exceptions.HTTPError(
+                    "500 Server Error: Server Error for url: https://mirth.local/api/channels"))
             return _FakeResponse(self._channels)
         raise AssertionError(f"GET inesperado en el fake: {url}")
 
@@ -121,6 +131,58 @@ def _channels_ok(**kwargs):
     return {"list": {"channel": [_channel_json(**kwargs)]}}
 
 
+# El mismo canal que _channel_json(), como lo devuelve Mirth 4.5.2 en XML
+# (atributos version/class incluidos, recortado a lo que usa la topología).
+_CANAL_XML = """
+  <channel version="4.5.2">
+    <id>{cid}</id>
+    <nextMetaDataId>2</nextMetaDataId>
+    <name>{nombre}</name>
+    <description></description>
+    <revision>7</revision>
+    <sourceConnector version="4.5.2">
+      <metaDataId>0</metaDataId>
+      <name>sourceConnector</name>
+      <properties class="com.mirth.connect.connectors.tcp.TcpReceiverProperties" version="4.5.2">
+        <pluginProperties/>
+        <listenerConnectorProperties version="4.5.2">
+          <host>0.0.0.0</host>
+          <port>6661</port>
+        </listenerConnectorProperties>
+      </properties>
+      <transportName>TCP Listener</transportName>
+      <mode>SOURCE</mode>
+      <enabled>true</enabled>
+    </sourceConnector>
+    <destinationConnectors>
+      <connector version="4.5.2">
+        <metaDataId>1</metaDataId>
+        <name>Enviar a RIS</name>
+        <properties class="{clase}" version="4.5.2">
+          {props}
+        </properties>
+        <transportName>{transport}</transportName>
+        <mode>DESTINATION</mode>
+        <enabled>true</enabled>
+      </connector>
+    </destinationConnectors>
+  </channel>"""
+
+
+def _channel_xml(cid="ch-1", nombre="ADT_A01", destino_transport="TCP Sender"):
+    if destino_transport == "TCP Sender":
+        clase = "com.mirth.connect.connectors.tcp.TcpDispatcherProperties"
+        props = "<remoteAddress>10.0.2.10</remoteAddress><remotePort>6663</remotePort>"
+    else:
+        clase = "com.mirth.connect.connectors.vm.VmDispatcherProperties"
+        props = "<channelId>ch-2</channelId>"
+    return _CANAL_XML.format(cid=cid, nombre=nombre, transport=destino_transport, clase=clase, props=props)
+
+
+def _channels_xml(*canales):
+    return "<list>" + "".join(canales) + "\n</list>"
+
+
 def _cfg(alias="Produccion", url="https://mirth.local"):
     return {"alias": alias, "url": url, "user": "u", "pass": "p"}
 
@@ -129,6 +191,7 @@ def setup_function(_):
     # El cache de topología vive a nivel de módulo -- limpiarlo entre tests
     # para que no se filtren resultados de un test a otro.
     mirth_collector._topo_cache.clear()
+    mirth_collector._avisado_xml.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +402,60 @@ def test_topologia_serializada_no_contiene_credenciales():
     serializado = json.dumps(topo)
     assert "MiClaveSecreta" not in serializado
     assert "OtraClave" not in serializado
+
+
+# ---------------------------------------------------------------------------
+# Fallback a XML: Mirth 4.5.2 (H05) da 500 en JSON en /api/channels
+# ---------------------------------------------------------------------------
+
+def test_topologia_por_xml_es_identica_a_la_de_json():
+    s_json = _FakeSession(channels={"list": {"channel": [
+        _channel_json(), _channel_json(cid="ch-3", nombre="ORM", destino_transport="Channel Writer")]}})
+    por_json = mirth_collector._recolectar_topologia(s_json, "https://mirth.local", "Prod", ["ch-1", "ch-3"])
+
+    mirth_collector._topo_cache.clear()
+    s_xml = _FakeSession(channels_json_500=True, channels_xml=_channels_xml(
+        _channel_xml(), _channel_xml(cid="ch-3", nombre="ORM", destino_transport="Channel Writer")))
+    por_xml = mirth_collector._recolectar_topologia(s_xml, "https://mirth.local", "Prod", ["ch-1", "ch-3"])
+
+    assert por_xml == por_json
+    assert por_xml[0]["destinations"][0]["metadata_id"] == 1, "en XML llega como texto: debe salir numérico"
+    assert por_xml[1]["destinations"][0]["target_channel_id"] == "ch-2"
+
+
+def test_topologia_por_xml_con_un_solo_canal():
+    s = _FakeSession(channels_json_500=True, channels_xml=_channels_xml(_channel_xml()))
+    canales = mirth_collector._recolectar_topologia(s, "https://mirth.local", "Prod", ["ch-1"])
+    assert [c["channel_id"] for c in canales] == ["ch-1"]
+    assert canales[0]["source"]["endpoint"] == "0.0.0.0:6661"
+
+
+def test_topologia_por_xml_sin_canales_da_lista_vacia():
+    s = _FakeSession(channels_json_500=True, channels_xml="<list/>")
+    assert mirth_collector._recolectar_topologia(s, "https://mirth.local", "Prod", []) == []
+
+
+def test_fallback_xml_se_loguea_una_sola_vez_por_alias():
+    logs = []
+    s = _FakeSession(channels_json_500=True, channels_xml=_channels_xml(_channel_xml()))
+    mirth_collector._recolectar_topologia(s, "https://mirth.local", "Prod", ["ch-1"], logs.append)
+    mirth_collector._topo_cache.clear()
+    mirth_collector._recolectar_topologia(s, "https://mirth.local", "Prod", ["ch-1"], logs.append)
+    assert len(logs) == 1 and "se usa XML" in logs[0]
+
+
+def test_si_fallan_json_y_xml_el_log_muestra_ambos():
+    logs = []
+    s = _FakeSession(channels_json_500=True, channels_xml="<list><channel>")  # XML cortado
+    resultado = mirth_collector._recolectar_topologia(s, "https://mirth.local", "Prod", ["ch-1"], logs.append)
+    assert resultado is None
+    assert "JSON: 500" in logs[0] and "XML:" in logs[0]
+
+
+def test_recolectar_mirth_con_json_500_manda_topologia_por_xml():
+    s = _FakeSession(statistics=_statistics_ok(), statuses=_statuses_ok(), channels_json_500=True,
+                      channels_xml=_channels_xml(_channel_xml()))
+    with mock.patch.object(mirth_collector.requests, "Session", return_value=s):
+        resultados, status, errores, topo = mirth_collector.recolectar_mirth([_cfg()])
+    assert status == "ok" and errores == 0
+    assert topo["Produccion"]["channels"][0]["channel_id"] == "ch-1"

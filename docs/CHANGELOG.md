@@ -7,6 +7,16 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
+## v4.5.3 (en desarrollo)
+
+- **Topología de Mirth: si `/api/channels` falla en JSON, se reintenta en XML** (`mirth_collector.py`).
+  En H05 (Mirth 4.5.2, instancia `MIRTH_PPAL`) la lista de canales da `500` en JSON y `200` en XML
+  (confirmado con `curl` el 2026-09-28): Mirth no puede convertir a JSON algún canal, pero el XML es su
+  formato nativo. Sin esto el hospital quedaba sin mapa de integraciones para esa instancia (el
+  monitoreo de canales no se afectaba). El XML se convierte a la misma forma que el JSON, así que la
+  topología enviada es idéntica; se loguea una vez por instancia que salió por XML. Donde JSON anda no
+  cambia nada. Tests: 6 casos nuevos en `tests/test_mirth_topologia.py`.
+
 ## v4.5.2
 
 - **Nuevo módulo: chequeo de integridad de bases SQL Server (`DBCC CHECKDB`) tras un reinicio**
