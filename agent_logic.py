@@ -17,6 +17,7 @@ import security
 import psutil
 import mirth_collector
 import sql_integrity
+import sql_backups
 import ssl
 from urllib.parse import urlparse
 from cryptography import x509
@@ -2486,6 +2487,8 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "dicom_routing": {"enabled": _dicom_routing_habilitado(config), "status": "disabled"},
         # --- NUEVO v4.5.2: chequeo de integridad de bases tras un reinicio de SQL Server ---
         "sql_integrity": {"enabled": sql_integrity.habilitado(config), "status": "disabled"},
+        # --- NUEVO v4.5.3: último backup completo de las bases SQL ---
+        "sql_backups": {"enabled": sql_backups.habilitado(config), "status": "disabled"},
     }
 
     reporte = {
@@ -2626,6 +2629,19 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             meta_si["source"] = integridad["source"]
         if integridad["payload"]:
             reporte["software_monitoring"]["sql_integrity"] = integridad["payload"]
+
+    # --- 5.7. Software Monitoring: último backup completo de las bases SQL (v4.5.3) ---
+    # Estado actual en cada ciclo (consulta liviana); el servidor decide si alertar. Mismos dos
+    # caminos que la integridad; ver sql_backups.py.
+    if collection_meta["sql_backups"]["enabled"]:
+        backups = sql_backups.recolectar(config, log_callback)
+        meta_bk = collection_meta["sql_backups"]
+        meta_bk["status"] = backups["status"]
+        meta_bk.update(backups["extra"])
+        if backups["source"]:
+            meta_bk["source"] = backups["source"]
+        if backups["payload"]:
+            reporte["software_monitoring"]["sql_backups"] = backups["payload"]
 
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):

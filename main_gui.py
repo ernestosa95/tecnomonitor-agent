@@ -15,6 +15,7 @@ import webview
 import security
 import agent_logic
 import sql_integrity
+import sql_backups
 import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
 
 DATA_DIR    = security.get_app_data_path()
@@ -328,6 +329,15 @@ class Api:
     @_requiere_sesion
     def test_checkdb_index_gui(self, data):
         return sql_integrity.test_conexion_indice(data)
+
+    # v4.5.3 — último backup completo de las bases SQL
+    @_requiere_sesion
+    def test_backups_sql_gui(self, data):
+        return sql_backups.test_conexion_sql(data)
+
+    @_requiere_sesion
+    def test_backups_index_gui(self, data):
+        return sql_backups.test_conexion_indice(data)
 
 
 # ---------------------------------------------------------------------------

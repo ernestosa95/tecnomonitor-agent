@@ -7,7 +7,19 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
-## v4.5.3 (en desarrollo)
+## v4.5.3
+
+- **Nuevo módulo: último backup completo de las bases SQL Server** (`sql_backups.py`, REQ-06). En
+  cada ciclo manda la fecha del último backup completo de cada base (`msdb.dbo.backupset`, solo
+  `type = 'D'`, sin "solo copia") en `software_monitoring.sql_backups`; el servidor decide si alertar
+  (más de 24 h por defecto, configurable allá). Mismas bases que la integridad
+  (`sql.checkdb_databases`). Dos caminos: Elastic principal (`elk/ext_sql_backups.conf`, agregado al
+  cajón horario `ext_kpis_negocio-all-sito.bat`, índice `ext_sql_backups` con un documento por base)
+  y SQL directo la excepción; si ambos están activos gana Elastic. GUI: sub-tarjetas "Último backup"
+  en SQL y en Elastic con botón de test. Contrato: [CONTRATO_AGENTE.md §7quater](./CONTRATO_AGENTE.md).
+  Tests: `tests/test_sql_backups.py` (16 casos). El servidor lo ingiere desde la versión del
+  `2026-09-28`; uno anterior lo descarta sin error.
+- `schema_version` sigue en `"4.5"` (por eso 4.5.3 y no 4.6).
 
 - **Topología de Mirth: si `/api/channels` falla en JSON, se reintenta en XML** (`mirth_collector.py`).
   En H05 (Mirth 4.5.2, instancia `MIRTH_PPAL`) la lista de canales da `500` en JSON y `200` en XML

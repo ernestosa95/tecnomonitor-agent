@@ -295,6 +295,36 @@ módulo está habilitado (camino Elastic o SQL directo; si ambos están activos 
 Mientras el chequeo corre o espera, `collection_meta.sql_integrity.status` es `"running"` o
 `"pending"`; la clave `sql_integrity` recién viaja al terminar.
 
+### 7quater. `sql_backups` — último backup completo de las bases (agente >= 4.5.3)
+
+> Implementado en el agente 4.5.3 (`sql_backups.py`). El servidor lo ingiere (contrato de ingesta,
+> §7.6); uno anterior lo descarta sin error.
+
+Clave opcional de `software_monitoring`. Viaja **en cada ciclo** con el estado actual, si el módulo
+está habilitado (camino Elastic o SQL directo; si ambos están activos gana Elastic). Solo backups
+completos (`msdb.dbo.backupset`, `type = 'D'`, sin "solo copia"); las bases son las mismas del
+chequeo de integridad.
+
+```json
+"sql_backups": {
+  "source": "sql",
+  "collected_at": "2026-09-28T15:00:00",
+  "databases": [
+    { "db": "ExtensaRadio", "last_full": "2026-09-28T02:10:00" },
+    { "db": "support",      "last_full": null }
+  ]
+}
+```
+
+| Campo | Descripción |
+|---|---|
+| `source` | `"elastic"` o `"sql"`: por qué camino se obtuvo. |
+| `collected_at` | Cuándo se leyó: hora del SQL (camino directo) o de la última corrida de Logstash (Elastic). Hora local, sin zona. |
+| `databases[].db` | Nombre de la base tal como está en el servidor. Las configuradas que no existen no viajan. |
+| `databases[].last_full` | Fin del último backup completo (hora local del SQL, sin zona), o `null` si nunca tuvo uno. |
+
+El agente no decide si un backup está vencido: eso (y el umbral) lo resuelve el servidor.
+
 ## 8. `collection_meta` — clave que el agente manda y no está en el contrato de ingesta
 
 ```json
@@ -307,7 +337,8 @@ Mientras el chequeo corre o espera, `collection_meta.sql_integrity.status` es `"
   "ssl_monitoring":   { "enabled": true, "status": "ok", "total": 5, "errors": 0 },
   "suitestensa_logs": { "enabled": true, "status": "ok", "new_alerts": 3 },
   "dicom_routing":    { "enabled": true, "status": "ok", "total": 8, "errors": 0 },
-  "sql_integrity":    { "enabled": true, "status": "ok", "source": "elastic", "total": 26 }
+  "sql_integrity":    { "enabled": true, "status": "ok", "source": "elastic", "total": 26 },
+  "sql_backups":      { "enabled": true, "status": "ok", "source": "elastic", "total": 26 }
 }
 ```
 

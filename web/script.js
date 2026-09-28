@@ -312,6 +312,8 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('sql_checkdb_type').value      = sql.checkdb_type === 'physical_only' ? 'physical_only' : 'full';
     document.getElementById('sql_checkdb_settle').value    = sql.checkdb_settle_minutes ?? 10;
     document.getElementById('sql_checkdb_databases').value = (sql.checkdb_databases || []).join('\n');
+    // Último backup completo de las bases, directo a SQL — v4.5.3
+    document.getElementById('sql_enabled_backups').checked = !!sql.enabled_backups;
 
     // Mirth — mismo patrón tarjeta + modal que los equipos.
     _limpiarListaDinamica('mirth_list');
@@ -339,6 +341,9 @@ function poblarFormularioModulos(perfil) {
     // Integridad de bases (DBCC CHECKDB) vía Elastic — v4.5.2
     document.getElementById('elastic_enabled_checkdb').checked = !!el.enabled_checkdb;
     document.getElementById('elastic_checkdb_index').value     = el.checkdb_index || 'ext_checkdb';
+    // Último backup completo de las bases vía Elastic — v4.5.3
+    document.getElementById('elastic_enabled_backups').checked = !!el.enabled_backups;
+    document.getElementById('elastic_backups_index').value     = el.backups_index || 'ext_sql_backups';
 
     document.getElementById('elastic_ris_exec_day').value    = el.ris_executions_per_day || 3;
     document.getElementById('elastic_ris_start_date').value  = el.ris_historical_start_date || '';
@@ -444,6 +449,7 @@ function _armarPerfilDesdeFormulario() {
             checkdb_type:          document.getElementById('sql_checkdb_type').value,
             checkdb_settle_minutes: _leerEsperaCheckdbDesdeUI(),
             checkdb_databases:     _leerBasesCheckdbDesdeUI(),
+            enabled_backups:       document.getElementById('sql_enabled_backups').checked,
         },
 
         enabled_vms: modulosActivos.includes('vms'),
@@ -471,6 +477,9 @@ function _armarPerfilDesdeFormulario() {
 
             enabled_checkdb:        document.getElementById('elastic_enabled_checkdb').checked,
             checkdb_index:          document.getElementById('elastic_checkdb_index').value.trim() || 'ext_checkdb',
+
+            enabled_backups:        document.getElementById('elastic_enabled_backups').checked,
+            backups_index:          document.getElementById('elastic_backups_index').value.trim() || 'ext_sql_backups',
 
             enabled_ris_metrics:      document.getElementById('enabled_ris_metrics').checked,
             ris_executions_per_day:   parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
@@ -1193,6 +1202,7 @@ function _leerConfigElasticDesdeUI() {
         use_https:   document.getElementById('elastic_use_https').checked,
         dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
         checkdb_index: document.getElementById('elastic_checkdb_index').value.trim() || 'ext_checkdb',
+        backups_index: document.getElementById('elastic_backups_index').value.trim() || 'ext_sql_backups',
         ris_index_ris:   document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
         ris_index_pacs:  document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
         ris_index_users: document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
@@ -1357,4 +1367,48 @@ async function testCheckdbIndex() {
         if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
         alert("Error de comunicación con Python: " + e);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// ÚLTIMO BACKUP COMPLETO DE LAS BASES SQL — v4.5.3
+// Dos caminos, igual que la integridad: directo a SQL (excepción, tarjeta SQL) y vía Elastic
+// (principal, tarjeta Elastic). Usa la misma lista de bases que CHECKDB.
+// ---------------------------------------------------------------------------
+async function _testConBoton(textoOriginal, llamada) {
+    const btn = window.event?.target?.closest('button');
+    let originalText = textoOriginal;
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+    try {
+        const res = await llamada();
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        alert("Error de comunicación con Python: " + e);
+    } finally {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+    }
+}
+
+async function testSqlBackups() {
+    const data = {
+        host: document.getElementById('sql_host').value.trim(),
+        user: document.getElementById('sql_user').value.trim(),
+        pass: document.getElementById('sql_pass').value,
+        checkdb_databases: _leerBasesCheckdbDesdeUI(),
+    };
+    if (!data.host) {
+        alert("⚠️ Ingresá el host de SQL Server primero (en la tarjeta SQL).");
+        return;
+    }
+    await _testConBoton('<i class="fas fa-plug me-2"></i>Test (lectura de backups)',
+                        () => pywebview.api.test_backups_sql_gui(data));
+}
+
+async function testBackupsIndex() {
+    const data = _leerConfigElasticDesdeUI();
+    if (!data.host) {
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+    await _testConBoton('<i class="fas fa-plug"></i> Test', () => pywebview.api.test_backups_index_gui(data));
 }

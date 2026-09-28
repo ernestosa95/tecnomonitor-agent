@@ -562,6 +562,18 @@
                                 <span class="modulo-titulo">Integridad de bases (directo a SQL)</span>
                             </div>
                         </div>
+                        <!-- Sub-ítem (v4.5.3): último backup completo de las bases, camino DIRECTO
+                             (excepción, hospitales sin Elastic). Si la versión vía Elastic también
+                             está activa, esa gana. Mismas bases que Integridad (CHECKDB). -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('sql_backups')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="sql_enabled_backups">
+                                </div>
+                                <i class="fas fa-box-archive text-primary mb-1"></i>
+                                <span class="modulo-titulo">Último backup (directo a SQL)</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer justify-content-start">
@@ -687,6 +699,33 @@
                                 </button>
                             </div>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Último backup directo a SQL (sub-ítem de la tarjeta SQL, v4.5.3) -->
+    <div class="modal fade" id="modal_sql_backups" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-box-archive me-2"></i>Último backup (directo a SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Informa en cada ciclo la fecha del <b>último backup completo</b> de cada base (según
+                        <code>msdb.dbo.backupset</code>; no cuenta diferenciales, de log ni "solo copia"). El
+                        servidor alerta si pasan más horas de las configuradas allá (24 h por defecto).
+                        <b>Es la excepción</b>: si el hospital tiene Elastic, usar "Último backup" en la
+                        tarjeta de Elastic; si ambas están activas, gana la de Elastic. Usa la misma conexión
+                        SQL de arriba y <b>la misma lista de bases que Integridad de bases (CHECKDB)</b>.
+                    </p>
+                    <div class="d-flex justify-content-end">
+                        <button class="btn btn-warning text-white shadow-sm" onclick="testSqlBackups()">
+                            <i class="fas fa-plug me-2"></i>Test (lectura de backups)
+                        </button>
                     </div>
                 </div>
             </div>
@@ -835,6 +874,17 @@
                                 <span class="modulo-titulo">Integridad de bases (CHECKDB)</span>
                             </div>
                         </div>
+                        <!-- Sub-ítem (v4.5.3): último backup completo de las bases, camino PRINCIPAL
+                             vía Logstash (elk/ext_sql_backups.conf, cajón de 1 hora). Gana sobre el directo. -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('elastic_backups')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="elastic_enabled_backups">
+                                </div>
+                                <i class="fas fa-box-archive text-primary mb-1"></i>
+                                <span class="modulo-titulo">Último backup de las bases</span>
+                            </div>
+                        </div>
 
                     </div>
                 </div>
@@ -937,6 +987,42 @@
                         </div>
                         <div class="col-md-4 d-flex align-items-start">
                             <button class="btn btn-warning text-white w-100 mt-4" onclick="testCheckdbIndex()">
+                                <i class="fas fa-plug"></i> Test
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Último backup vía Elastic (sub-ítem de la tarjeta Elastic, v4.5.3) -->
+    <div class="modal fade" id="modal_elastic_backups" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-box-archive me-2"></i>Último backup de las bases (vía Elastic)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Lee la fecha del último backup completo de cada base que Logstash consulta cada hora
+                        (pipeline <code>ext_sql_backups</code>, en el <code>.bat</code> de KPIs de negocio; ver la
+                        carpeta <code>elk/</code>). <b>La lista de bases se edita en <code>ext_sql_backups.conf</code></b>
+                        del servidor ELK (la misma que <code>ext_checkdb.conf</code>). El servidor alerta si pasan
+                        más horas de las configuradas allá (24 h por defecto).
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label text-muted small fw-bold">Índice de backups</label>
+                            <input type="text" class="form-control" id="elastic_backups_index"
+                                   placeholder="ext_sql_backups" value="ext_sql_backups">
+                            <small class="text-muted d-block mt-1">
+                                Un documento por base con su último backup completo (cada corrida pisa la anterior).
+                            </small>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-start">
+                            <button class="btn btn-warning text-white w-100 mt-4" onclick="testBackupsIndex()">
                                 <i class="fas fa-plug"></i> Test
                             </button>
                         </div>
