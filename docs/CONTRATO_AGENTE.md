@@ -325,6 +325,45 @@ chequeo de integridad.
 
 El agente no decide si un backup está vencido: eso (y el umbral) lo resuelve el servidor.
 
+### 7quinquies. `patient_portal` — cola de publicación del portal paciente (agente >= 4.5.4)
+
+> Implementado en el agente 4.5.4 (`portal_paciente.py`). El servidor lo ingiere (contrato de ingesta,
+> §7.7); uno anterior lo descarta sin error.
+
+Clave opcional de `software_monitoring`, solo en hospitales con portal paciente. Viaja **en cada
+ciclo**, si el módulo está habilitado (camino Elastic o SQL directo; si ambos están activos gana
+Elastic). Un ítem por estado del RIS (`PublicationState`) y de la cola del MPS (`STATUS_ID`), contando
+los últimos `window_days` días; los estados del catálogo sin estudios viajan con `total` 0.
+
+```json
+"patient_portal": {
+  "source": "elastic",
+  "collected_at": "2026-09-30T10:00:05",
+  "window_days": 30,
+  "states": [
+    { "origin": "RIS", "code": "4", "state": "To be published", "total": 280, "last_24h": 12,
+      "pending_iso": 0, "with_iso": 0, "oldest": "2026-09-24T08:03:00" },
+    { "origin": "MPS", "code": "1", "state": "IDLE", "total": 114, "last_24h": 5,
+      "pending_iso": 111, "with_iso": 3, "oldest": "2026-09-24T12:56:11" }
+  ]
+}
+```
+
+| Campo | Descripción |
+|---|---|
+| `source` | `"elastic"` o `"sql"`: por qué camino se obtuvo. |
+| `collected_at` | Cuándo se leyó: hora del SQL (camino directo) o de la última corrida de Logstash (Elastic). Hora local, sin zona. |
+| `states[].origin` | `"RIS"` o `"MPS"`. |
+| `states[].code` / `state` | Código y descripción del estado (`"NULL"` en el RIS = informe todavía no definitivo). |
+| `states[].total` | Estudios en ese estado (admitidos en la ventana en el RIS; entrados a la cola en la ventana en el MPS). |
+| `states[].last_24h` | Cuántos de esos son de las últimas 24 h. |
+| `states[].pending_iso` / `with_iso` | Solo MPS: sin ISO generada / con ISO generada (`JOBS.MEDIA_ACTUAL_SIZE`). |
+| `states[].oldest` | Admisión más antigua (RIS) o entrada a la cola más antigua (MPS), o `null` si no hay estudios. |
+
+El agente no decide qué estado es pendiente, error o final: eso (y las alertas) lo resuelve el servidor.
+Si la consulta del MPS falla y la del RIS no (camino SQL), viaja solo el RIS y
+`collection_meta.patient_portal.status` es `"partial"`.
+
 ## 8. `collection_meta` — clave que el agente manda y no está en el contrato de ingesta
 
 ```json
@@ -338,7 +377,8 @@ El agente no decide si un backup está vencido: eso (y el umbral) lo resuelve el
   "suitestensa_logs": { "enabled": true, "status": "ok", "new_alerts": 3 },
   "dicom_routing":    { "enabled": true, "status": "ok", "total": 8, "errors": 0 },
   "sql_integrity":    { "enabled": true, "status": "ok", "source": "elastic", "total": 26 },
-  "sql_backups":      { "enabled": true, "status": "ok", "source": "elastic", "total": 26 }
+  "sql_backups":      { "enabled": true, "status": "ok", "source": "elastic", "total": 26 },
+  "patient_portal":   { "enabled": true, "status": "ok", "source": "elastic", "total": 9 }
 }
 ```
 

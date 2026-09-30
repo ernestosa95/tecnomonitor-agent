@@ -77,7 +77,7 @@ que se agreguen más `.conf`):
 
 | Cajón | `.bat` | Disparador de la tarea | Qué vive ahí hoy |
 |---|---|---|---|
-| Tiempo real | `ext_tiempo_real-all-sito.bat` | Repetir cada 5 min | `ext_dicom_queues.conf` |
+| Tiempo real | `ext_tiempo_real-all-sito.bat` | Repetir cada 5 min | `ext_dicom_queues.conf`, `ext_portal_paciente.conf` (portal paciente, v4.5.4; solo donde hay portal) |
 | Métricas de negocio | `ext_kpis_negocio-all-sito.bat` | Repetir cada 1 hora | `ext_ris_metrics.conf`, `ext_pacs_metrics.conf`, `ext_users_metrics.conf`, `ext_sql_backups.conf` (último backup de las bases, v4.5.3) |
 | Al reinicio | `ext_al_reinicio-all-sito.bat` | Al iniciar el equipo (sin repetición) | *(pendiente de definir)* |
 

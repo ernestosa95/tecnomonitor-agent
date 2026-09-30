@@ -574,6 +574,18 @@
                                 <span class="modulo-titulo">Último backup (directo a SQL)</span>
                             </div>
                         </div>
+                        <!-- Sub-ítem (v4.5.4): cola de publicación del portal paciente, camino DIRECTO
+                             (excepción, hospitales sin Elastic). Si la versión vía Elastic también
+                             está activa, esa gana. Solo en hospitales con portal paciente. -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('sql_portal')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="sql_enabled_portal">
+                                </div>
+                                <i class="fas fa-hospital-user text-primary mb-1"></i>
+                                <span class="modulo-titulo">Portal paciente (directo a SQL)</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer justify-content-start">
@@ -725,6 +737,34 @@
                     <div class="d-flex justify-content-end">
                         <button class="btn btn-warning text-white shadow-sm" onclick="testSqlBackups()">
                             <i class="fas fa-plug me-2"></i>Test (lectura de backups)
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Portal paciente directo a SQL (sub-ítem de la tarjeta SQL, v4.5.4) -->
+    <div class="modal fade" id="modal_sql_portal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-hospital-user me-2"></i>Portal paciente (directo a SQL)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Informa en cada ciclo cuántos estudios hay en cada <b>estado de publicación del RIS</b>
+                        (<code>ExtensaRadio</code>) y de la <b>cola de generación de ISO del MPS</b>
+                        (<code>ExtensaMPS</code>), con el más antiguo de cada uno (últimos 30 días). El servidor
+                        dibuja la evolución y alerta. <b>Activar solo en hospitales con portal paciente.</b>
+                        <b>Es la excepción</b>: si el hospital tiene Elastic, usar "Portal paciente" en la
+                        tarjeta de Elastic; si ambas están activas, gana la de Elastic. Usa la misma conexión
+                        SQL de arriba.
+                    </p>
+                    <div class="d-flex justify-content-end">
+                        <button class="btn btn-warning text-white shadow-sm" onclick="testSqlPortal()">
+                            <i class="fas fa-plug me-2"></i>Test (lectura de la cola)
                         </button>
                     </div>
                 </div>
@@ -885,6 +925,17 @@
                                 <span class="modulo-titulo">Último backup de las bases</span>
                             </div>
                         </div>
+                        <!-- Sub-ítem (v4.5.4): cola de publicación del portal paciente, camino PRINCIPAL
+                             vía Logstash (elk/ext_portal_paciente.conf, cajón de 5 minutos). Gana sobre el directo. -->
+                        <div class="col-md-4">
+                            <div class="modulo-card" onclick="abrirModalModulo('elastic_portal')">
+                                <div class="form-check form-switch position-absolute top-0 end-0 m-2" onclick="event.stopPropagation();">
+                                    <input class="form-check-input" type="checkbox" id="elastic_enabled_portal">
+                                </div>
+                                <i class="fas fa-hospital-user text-primary mb-1"></i>
+                                <span class="modulo-titulo">Portal paciente</span>
+                            </div>
+                        </div>
 
                     </div>
                 </div>
@@ -1023,6 +1074,41 @@
                         </div>
                         <div class="col-md-4 d-flex align-items-start">
                             <button class="btn btn-warning text-white w-100 mt-4" onclick="testBackupsIndex()">
+                                <i class="fas fa-plug"></i> Test
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detalle: Portal paciente vía Elastic (sub-ítem de la tarjeta Elastic, v4.5.4) -->
+    <div class="modal fade" id="modal_elastic_portal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-hospital-user me-2"></i>Portal paciente (vía Elastic)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">
+                        Lee cuántos estudios hay en cada estado de publicación del RIS y de la cola de generación
+                        de ISO del MPS, que Logstash consulta cada 5 minutos (pipeline <code>ext_portal_paciente</code>,
+                        en el <code>.bat</code> de tiempo real; ver la carpeta <code>elk/</code>). El servidor dibuja
+                        la evolución y alerta. <b>Activar solo en hospitales con portal paciente.</b>
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label text-muted small fw-bold">Índice del portal paciente</label>
+                            <input type="text" class="form-control" id="elastic_portal_index"
+                                   placeholder="ext_portal_paciente" value="ext_portal_paciente">
+                            <small class="text-muted d-block mt-1">
+                                Un documento por estado (cada corrida pisa la anterior).
+                            </small>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-start">
+                            <button class="btn btn-warning text-white w-100 mt-4" onclick="testPortalIndex()">
                                 <i class="fas fa-plug"></i> Test
                             </button>
                         </div>

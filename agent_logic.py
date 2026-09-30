@@ -18,6 +18,7 @@ import psutil
 import mirth_collector
 import sql_integrity
 import sql_backups
+import portal_paciente
 import ssl
 from urllib.parse import urlparse
 from cryptography import x509
@@ -2489,6 +2490,8 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "sql_integrity": {"enabled": sql_integrity.habilitado(config), "status": "disabled"},
         # --- NUEVO v4.5.3: último backup completo de las bases SQL ---
         "sql_backups": {"enabled": sql_backups.habilitado(config), "status": "disabled"},
+        # --- NUEVO v4.5.4: cola de publicación del portal paciente (RIS + MPS) ---
+        "patient_portal": {"enabled": portal_paciente.habilitado(config), "status": "disabled"},
     }
 
     reporte = {
@@ -2642,6 +2645,19 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             meta_bk["source"] = backups["source"]
         if backups["payload"]:
             reporte["software_monitoring"]["sql_backups"] = backups["payload"]
+
+    # --- 5.8. Software Monitoring: cola de publicación del portal paciente (v4.5.4) ---
+    # Conteo por estado en el RIS y en la cola del MPS, en cada ciclo; el servidor arma la serie
+    # temporal y decide qué estado es pendiente, error o final. Ver portal_paciente.py.
+    if collection_meta["patient_portal"]["enabled"]:
+        portal = portal_paciente.recolectar(config, log_callback)
+        meta_pp = collection_meta["patient_portal"]
+        meta_pp["status"] = portal["status"]
+        meta_pp.update(portal["extra"])
+        if portal["source"]:
+            meta_pp["source"] = portal["source"]
+        if portal["payload"]:
+            reporte["software_monitoring"]["patient_portal"] = portal["payload"]
 
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):

@@ -16,6 +16,7 @@ import security
 import agent_logic
 import sql_integrity
 import sql_backups
+import portal_paciente
 import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
 
 DATA_DIR    = security.get_app_data_path()
@@ -338,6 +339,15 @@ class Api:
     @_requiere_sesion
     def test_backups_index_gui(self, data):
         return sql_backups.test_conexion_indice(data)
+
+    # v4.5.4 — cola de publicación del portal paciente
+    @_requiere_sesion
+    def test_portal_sql_gui(self, data):
+        return portal_paciente.test_conexion_sql(data)
+
+    @_requiere_sesion
+    def test_portal_index_gui(self, data):
+        return portal_paciente.test_conexion_indice(data)
 
 
 # ---------------------------------------------------------------------------

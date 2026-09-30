@@ -314,6 +314,8 @@ function poblarFormularioModulos(perfil) {
     document.getElementById('sql_checkdb_databases').value = (sql.checkdb_databases || []).join('\n');
     // Último backup completo de las bases, directo a SQL — v4.5.3
     document.getElementById('sql_enabled_backups').checked = !!sql.enabled_backups;
+    // Portal paciente, directo a SQL — v4.5.4
+    document.getElementById('sql_enabled_portal').checked = !!sql.enabled_portal;
 
     // Mirth — mismo patrón tarjeta + modal que los equipos.
     _limpiarListaDinamica('mirth_list');
@@ -344,6 +346,9 @@ function poblarFormularioModulos(perfil) {
     // Último backup completo de las bases vía Elastic — v4.5.3
     document.getElementById('elastic_enabled_backups').checked = !!el.enabled_backups;
     document.getElementById('elastic_backups_index').value     = el.backups_index || 'ext_sql_backups';
+    // Portal paciente vía Elastic — v4.5.4
+    document.getElementById('elastic_enabled_portal').checked = !!el.enabled_portal;
+    document.getElementById('elastic_portal_index').value     = el.portal_index || 'ext_portal_paciente';
 
     document.getElementById('elastic_ris_exec_day').value    = el.ris_executions_per_day || 3;
     document.getElementById('elastic_ris_start_date').value  = el.ris_historical_start_date || '';
@@ -450,6 +455,7 @@ function _armarPerfilDesdeFormulario() {
             checkdb_settle_minutes: _leerEsperaCheckdbDesdeUI(),
             checkdb_databases:     _leerBasesCheckdbDesdeUI(),
             enabled_backups:       document.getElementById('sql_enabled_backups').checked,
+            enabled_portal:        document.getElementById('sql_enabled_portal').checked,
         },
 
         enabled_vms: modulosActivos.includes('vms'),
@@ -480,6 +486,9 @@ function _armarPerfilDesdeFormulario() {
 
             enabled_backups:        document.getElementById('elastic_enabled_backups').checked,
             backups_index:          document.getElementById('elastic_backups_index').value.trim() || 'ext_sql_backups',
+
+            enabled_portal:         document.getElementById('elastic_enabled_portal').checked,
+            portal_index:           document.getElementById('elastic_portal_index').value.trim() || 'ext_portal_paciente',
 
             enabled_ris_metrics:      document.getElementById('enabled_ris_metrics').checked,
             ris_executions_per_day:   parseInt(document.getElementById('elastic_ris_exec_day').value) || 3,
@@ -1203,6 +1212,7 @@ function _leerConfigElasticDesdeUI() {
         dicom_index: document.getElementById('elastic_dicom_index').value.trim() || 'ext_dicom_queues',
         checkdb_index: document.getElementById('elastic_checkdb_index').value.trim() || 'ext_checkdb',
         backups_index: document.getElementById('elastic_backups_index').value.trim() || 'ext_sql_backups',
+        portal_index:  document.getElementById('elastic_portal_index').value.trim() || 'ext_portal_paciente',
         ris_index_ris:   document.getElementById('elastic_ris_index_ris').value.trim()   || 'ext_ris_metrics_hourly',
         ris_index_pacs:  document.getElementById('elastic_ris_index_pacs').value.trim()  || 'ext_pacs_metrics_hourly',
         ris_index_users: document.getElementById('elastic_ris_index_users').value.trim() || 'ext_users_metrics_hourly',
@@ -1411,4 +1421,33 @@ async function testBackupsIndex() {
         return;
     }
     await _testConBoton('<i class="fas fa-plug"></i> Test', () => pywebview.api.test_backups_index_gui(data));
+}
+
+
+// ---------------------------------------------------------------------------
+// PORTAL PACIENTE (cola de publicación RIS + MPS) — v4.5.4
+// Dos caminos, igual que los backups: directo a SQL (excepción, tarjeta SQL) y vía Elastic
+// (principal, tarjeta Elastic).
+// ---------------------------------------------------------------------------
+async function testSqlPortal() {
+    const data = {
+        host: document.getElementById('sql_host').value.trim(),
+        user: document.getElementById('sql_user').value.trim(),
+        pass: document.getElementById('sql_pass').value,
+    };
+    if (!data.host) {
+        alert("⚠️ Ingresá el host de SQL Server primero (en la tarjeta SQL).");
+        return;
+    }
+    await _testConBoton('<i class="fas fa-plug me-2"></i>Test (lectura de la cola)',
+                        () => pywebview.api.test_portal_sql_gui(data));
+}
+
+async function testPortalIndex() {
+    const data = _leerConfigElasticDesdeUI();
+    if (!data.host) {
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+    await _testConBoton('<i class="fas fa-plug"></i> Test', () => pywebview.api.test_portal_index_gui(data));
 }

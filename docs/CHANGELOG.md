@@ -7,6 +7,22 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
+## v4.5.4 (en desarrollo)
+
+- **Nuevo módulo: portal paciente, cola de publicación RIS → MPS** (`portal_paciente.py`, REQ-07). En
+  cada ciclo manda, por estado, cuántos estudios hay en el RIS (`tbExamination.PublicationState`) y
+  en la cola de generación de ISO del MPS (`ExtMPS.QUEUE` + `JOBS`, con cuántos tienen la ISO
+  generada), con el más antiguo de cada uno, sobre los últimos 30 días, en
+  `software_monitoring.patient_portal`. El agente no clasifica los estados: lo hace el servidor, que
+  además dibuja la línea de tiempo por estado y alerta. Dos caminos: Elastic principal
+  (`elk/ext_portal_paciente.conf`, en el cajón de 5 minutos `ext_tiempo_real-all-sito.bat`, índice
+  `ext_portal_paciente` con un documento por estado) y SQL directo la excepción; si ambos están
+  activos gana Elastic. Solo en hospitales con portal paciente. GUI: sub-tarjetas "Portal paciente" en
+  SQL y en Elastic con botón de test. Contrato: [CONTRATO_AGENTE.md §7quinquies](./CONTRATO_AGENTE.md).
+  Tests: `tests/test_portal_paciente.py` (19 casos). El servidor lo ingiere desde la versión del
+  `2026-09-30`; uno anterior lo descarta sin error.
+- `schema_version` sigue en `"4.5"` (por eso 4.5.4 y no 4.6).
+
 ## v4.5.3
 
 - **Nuevo módulo: último backup completo de las bases SQL Server** (`sql_backups.py`, REQ-06). En
