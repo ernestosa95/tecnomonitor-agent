@@ -89,7 +89,7 @@ def _leer_version():
                 return valor
     except Exception:
         pass
-    return "4.5.3"
+    return "4.5.4"
 
 
 AGENT_VERSION  = _leer_version()

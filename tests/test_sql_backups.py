@@ -190,7 +190,7 @@ def test_ciclo_incluye_sql_backups_en_cada_envio(datos):
     rep = _ciclo(CFG_EL)
     assert rep["collection_meta"]["sql_backups"] == {"enabled": True, "status": "ok", "total": 1, "source": "elastic"}
     assert rep["software_monitoring"]["sql_backups"]["databases"] == [{"db": "ExtensaRadio", "last_full": "2026-09-28T02:10:00"}]
-    assert rep["envelope"]["agent_version"] == "4.5.3" and rep["envelope"]["schema_version"] == "4.5"
+    assert rep["envelope"]["agent_version"] == "4.5.4" and rep["envelope"]["schema_version"] == "4.5"
 
 
 def test_ciclo_con_el_modulo_apagado_no_manda_nada(datos):
