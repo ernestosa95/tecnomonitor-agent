@@ -77,7 +77,7 @@ que se agreguen más `.conf`):
 
 | Cajón | `.bat` | Disparador de la tarea | Qué vive ahí hoy |
 |---|---|---|---|
-| Tiempo real | `ext_tiempo_real-all-sito.bat` | Repetir cada 5 min | `ext_dicom_queues.conf`, `ext_portal_paciente.conf` (portal paciente, v4.5.4; solo donde hay portal) |
+| Tiempo real | `ext_tiempo_real-all-sito.bat` | Repetir cada 5 min, con *"Stop the task if it runs longer than"* 4 min | `ext_dicom_queues.conf`, `ext_portal_paciente.conf` (portal paciente, v4.5.4; solo donde hay portal) |
 | Métricas de negocio | `ext_kpis_negocio-all-sito.bat` | Repetir cada 1 hora | `ext_ris_metrics.conf`, `ext_pacs_metrics.conf`, `ext_users_metrics.conf`, `ext_sql_backups.conf` (último backup de las bases, v4.5.3) |
 | Al reinicio | `ext_al_reinicio-all-sito.bat` | Al iniciar el equipo (sin repetición) | *(pendiente de definir)* |
 
@@ -85,6 +85,13 @@ Cada `CALL` dentro de un `.bat` sigue siendo un proceso Logstash independiente y
 — no hay mezcla de datos entre índices, solo se ejecutan uno atrás del otro dentro de la misma
 corrida de la tarea. Mismo patrón que ya usan los `.bat` "-all-" existentes del hospital (ej.
 `ext_cardiocath-all-sito.bat`).
+
+**Pero un `CALL` colgado frena a todo el cajón:** si un Logstash no termina (típicamente una
+conexión `jdbc` con un placeholder sin completar, que reintenta para siempre), la tarea queda en
+"Running" y, con "Do not start a new instance", Windows descarta cada disparo siguiente (evento
+`322` en el History). Por eso los cajones de 5 min y 1 hora llevan *"Stop the task if it runs longer
+than"* con un tope menor que la cadencia. Pasó en H05 (2026-09-30) con el segundo `jdbc` de
+`ext_portal_paciente.conf` sin credenciales: se paró también el autoenrute DICOM.
 
 El cajón "al reinicio" es para datos que solo tiene sentido recalcular cuando la VM/servidor
 arranca de nuevo (no una serie de tiempo continua) — el disparador en el Programador de Tareas

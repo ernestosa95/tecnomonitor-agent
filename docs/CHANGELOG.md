@@ -7,7 +7,13 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
-## v4.5.4 (en desarrollo)
+## v4.5.4
+
+Validada en H05 (2026-09-30), primer hospital con portal paciente: las consultas corren contra el
+SQL real sin cambios y el índice se actualiza cada 5 minutos. Los tropiezos del piloto fueron del
+`.conf` desplegado (placeholders sin completar en el output y en el segundo `jdbc`), no del código;
+la advertencia quedó en el encabezado de `ext_portal_paciente.conf` y en la guía
+`tecnomonitor-server/docs/guias/19-guia-despliegue-portal-paciente.md`.
 
 - **Nuevo módulo: portal paciente, cola de publicación RIS → MPS** (`portal_paciente.py`, REQ-07). En
   cada ciclo manda, por estado, cuántos estudios hay en el RIS (`tbExamination.PublicationState`) y
