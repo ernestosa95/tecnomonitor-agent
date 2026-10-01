@@ -7,6 +7,8 @@ venv/
 .pytest_cache/
 
 # PyInstaller (No subir los .exe, se generan localmente)
+# Instalador de WebView2 Runtime que build/Inno Setup incluyen si está (~170 MB, se baja de Microsoft)
+redist/
 build/
 dist/
 *.spec

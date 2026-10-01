@@ -4,6 +4,19 @@
 
 - Windows con permisos de administrador (el instalador exige `PrivilegesRequired=admin`).
 - Arquitectura x64 (`ArchitecturesInstallIn64BitMode=x64`).
+- **Microsoft Edge WebView2 Runtime para la pantalla de configuración.** Windows 10/11 lo traen;
+  **los Windows Server (2016, 2019, 2022) no.** Sin él la configuración se abría casi en blanco, sin
+  formato, y no se podía ingresar el código de acceso ni el token (Milstein, Server 2022,
+  2026-10-01). Desde ahora:
+  - si el instalador se compiló con `redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe`, lo
+    instala solo cuando falta;
+  - si no, al terminar avisa que falta y cómo instalarlo; el servicio queda instalado igual;
+  - la configuración, si falta, muestra un aviso con los pasos en lugar de una ventana rota.
+
+  A mano: bajar el "Evergreen Standalone Installer" x64 de
+  <https://developer.microsoft.com/microsoft-edge/webview2/> (sirve offline) y ejecutarlo como
+  administrador. Si la primera apertura salió en blanco, el código de acceso se generó pero no se
+  vio: borrar `C:\ProgramData\TecnoMonitor\admin.hash` y volver a abrir para obtener uno nuevo.
 - Para el módulo VMware: `pyVmomi` debe estar disponible en el entorno de ejecución del agente
   (se detecta en runtime; si falta, el módulo reporta el error de forma controlada en vez de
   romper el ciclo completo).

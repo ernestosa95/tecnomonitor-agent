@@ -42,7 +42,13 @@ Script Windows (`cmd`) que compila y empaqueta todo en un solo paso. Pasos:
    - `--uac-admin` fuerza la elevación al abrir la GUI, necesaria porque habla con el SCM.
    - `--add-data "web;web"` empaqueta el frontend (HTML/JS/CSS) dentro del ejecutable; en
      runtime se resuelve con `resource_path()` (`sys._MEIPASS` si está "frozen").
-5. **Busca `ISCC.exe`** (compilador de Inno Setup) en las rutas estándar de instalación
+5. **WebView2 Runtime (opcional, recomendado):** si existe
+   `redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe` (el "Evergreen Standalone Installer" x64,
+   ~170 MB, de <https://developer.microsoft.com/microsoft-edge/webview2/>), Inno Setup lo incluye
+   y el instalador lo ejecuta solo en los equipos donde falta (Windows Server). No se versiona
+   (`redist/` está en `.gitignore`). Sin ese archivo el instalador compila igual y avisa al
+   terminar si el equipo no tiene WebView2. Ver `webview2.py`.
+6. **Busca `ISCC.exe`** (compilador de Inno Setup) en las rutas estándar de instalación
    (Program Files, Program Files (x86), o `%LOCALAPPDATA%\Programs`). Si lo encuentra, compila
    `TecnoMonitor.iss` y genera el instalador final en `Output\`. Si no lo encuentra, el script
    termina en éxito parcial ("compilación de binarios exitosa, sin instalador") — deja

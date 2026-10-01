@@ -7,6 +7,15 @@ Git — para el detalle línea por línea de cada cambio, `git log`/`git blame` 
 autoritativa; esto es un resumen narrativo pensado para entender *por qué* el sistema quedó
 como está.
 
+## Sin publicar
+
+- **Chequeo de WebView2 Runtime** (`webview2.py`). La configuración (pywebview) lo necesita y los
+  Windows Server no lo traen: sin él se abría casi en blanco y no se podía cargar el token
+  (Milstein, Server 2022, 2026-10-01). La GUI ahora lo detecta antes de abrir y, si falta, muestra
+  un aviso con los pasos (y lo deja en `activity.log`). El instalador lo instala solo si se compiló
+  con `redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe` y, si al terminar sigue faltando, lo
+  avisa. Ver `docs/INSTALACION.md` y `docs/BUILD.md`.
+
 ## v4.5.4
 
 Validada en H05 (2026-09-30), primer hospital con portal paciente: las consultas corren contra el

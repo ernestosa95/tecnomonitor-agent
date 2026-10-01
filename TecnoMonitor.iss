@@ -46,6 +46,11 @@ Type: filesandordirs; Name: "{app}\service"
 ; el SCM es el mismo que corre el bucle.
 Source: "dist\TecnoMonitorService\*"; DestDir: "{app}\service"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; WebView2 Runtime (opcional): si al compilar está en redist\, se instala cuando falta. La GUI lo
+; necesita para dibujarse y los Windows Server no lo traen (ver webview2.py). Es el "Evergreen
+; Standalone Installer" x64 de Microsoft: no necesita internet en el equipo del hospital.
+Source: "redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
+
 ; La GUI sigue siendo un único .exe portable.
 Source: "dist\TecnoMonitorConfig.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "logo.ico";                    DestDir: "{app}"; Flags: ignoreversion
@@ -83,6 +88,9 @@ Filename: "sc.exe"; Parameters: "start TecnoMonitorAgent"; Flags: runhidden wait
 Filename: "{app}\service\TecnoMonitorService.exe"; Parameters: "install-task"; Flags: runhidden waituntilterminated; StatusMsg: "Registrando la tarea programada..."; Check: ModoEsTarea
 
 ; --- COMÚN A AMBOS MODOS ---
+; WebView2 Runtime para la GUI, solo si falta y vino incluido en el instalador.
+Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/silent /install"; Flags: waituntilterminated; StatusMsg: "Instalando Microsoft Edge WebView2 Runtime (necesario para la configuración)..."; Check: HayQueInstalarWebView2
+
 ; 5. Abrir la GUI al terminar.
 Filename: "{app}\TecnoMonitorConfig.exe"; Description: "Abrir configuración de TecnoMonitor ahora"; Flags: postinstall nowait shellexec
 
@@ -154,6 +162,47 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
     EscribirMarcadorDeModo();
+end;
+
+// --- WebView2 Runtime (lo necesita la GUI; ver webview2.py) ---
+// Mismas claves que documenta Microsoft para detectarlo: valor `pv` del cliente de EdgeUpdate
+// en HKLM (64 y 32 bits) o HKCU; vacío o 0.0.0.0 = no instalado.
+function WebView2EnClave(Root: Integer; Clave: String): Boolean;
+var
+  Version: String;
+begin
+  Result := RegQueryStringValue(Root, Clave, 'pv', Version) and (Version <> '') and (Version <> '0.0.0.0');
+end;
+
+function WebView2Instalado(): Boolean;
+var
+  Cliente: String;
+begin
+  Cliente := '\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  Result := WebView2EnClave(HKLM, 'SOFTWARE\WOW6432Node' + Cliente) or
+            WebView2EnClave(HKLM, 'SOFTWARE' + Cliente) or
+            WebView2EnClave(HKCU, 'Software' + Cliente);
+end;
+
+function HayQueInstalarWebView2(): Boolean;
+begin
+  Result := (not WebView2Instalado()) and
+            FileExists(ExpandConstant('{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe'));
+end;
+
+// Al final (después de [Run]): si WebView2 sigue sin estar, avisar antes de que se abra una
+// configuración que no se va a poder usar. El servicio queda instalado y corriendo igual.
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and (not WebView2Instalado()) then
+    MsgBox('Falta Microsoft Edge WebView2 Runtime en este equipo.' + #13#10 + #13#10 +
+           'El servicio de TecnoMonitor quedó instalado, pero la pantalla de configuración ' +
+           '(donde se carga el token del hospital) lo necesita para mostrarse. Los Windows Server ' +
+           'no lo traen instalado.' + #13#10 + #13#10 +
+           'Descargue el "Evergreen Standalone Installer" x64 de WebView2 desde ' +
+           'https://developer.microsoft.com/microsoft-edge/webview2/ , ejecútelo como ' +
+           'administrador y después abra TecnoMonitor Config.',
+           mbInformation, MB_OK);
 end;
 
 // --- CIRUGÍA PREVIA A LA INSTALACIÓN ---

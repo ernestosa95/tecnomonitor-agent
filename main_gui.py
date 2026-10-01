@@ -18,6 +18,7 @@ import sql_integrity
 import sql_backups
 import portal_paciente
 import service_control   # v4.4: control del servicio vía SCM (reemplaza schtasks/taskkill)
+import webview2
 
 DATA_DIR    = security.get_app_data_path()
 CONFIG_FILE = os.path.join(DATA_DIR, "monitor_config.json")
@@ -354,6 +355,11 @@ class Api:
 # ARRANQUE
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
+    # Sin WebView2 pywebview cae al motor de Internet Explorer y la GUI sale en blanco (no se
+    # puede ni ingresar el código ni cargar el token): mejor un aviso claro que una ventana rota.
+    if sys.platform == 'win32' and not webview2.version_instalada():
+        webview2.avisar_falta(LOG_FILE)
+        sys.exit(1)
     try:
         window = webview.create_window(
             'TecnoMonitor',
